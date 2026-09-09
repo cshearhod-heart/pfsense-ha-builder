@@ -2,3 +2,4 @@
 # and full network topology. Never commit a real config.xml to this repo.
 *.xml
 !test-fixtures/*.xml
+.DS_Store

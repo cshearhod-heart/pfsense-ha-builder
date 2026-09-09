@@ -23,11 +23,19 @@ Open `pfsense-ha-builder.html` in any browser. Nothing is uploaded — parsing, 
 
 Verified against pfSense's own config-sync engine (`rc.filter_synchronize` in the pfSense source): when the primary pushes its config to the secondary via XMLRPC, it automatically adds 100 to every CARP VIP's `advskew` (capped at 254) in the copy it sends. Rather than generate a secondary file that's only correct *after* the first sync, this tool bakes in the post-sync value up front — set the primary's skew (default 0, advanced section), and the secondary is always skew+100. The same source confirms `failover_peerip` gets rewritten to the sender's own IP on each sync, which is why the DHCP failover fields this tool sets already match what pfSense would converge to on its own.
 
+## VLAN interfaces
+
+If an interface's physical port is actually a VLAN pseudo-interface (e.g. `mvneta1.2`), the tool detects it against the config's `<vlans>` section and locks that field instead of letting it be typed like a real NIC name — the value is computed from a parent port + tag defined elsewhere, and editing it without also updating the matching `<vlans>` entry produces a dangling reference. On identical hardware the VLAN carries over correctly with no changes needed, since the whole `<vlans>` section clones unchanged to both generated files.
+
+## SYNC interface: new vs. reuse existing
+
+The SYNC section offers two sources: **create a new dedicated interface** (the default), or **reuse an existing interface already defined in the config but currently unused** (no `<ipaddr>` and not enabled — e.g. a spare `optN` slot freed up by moving something else onto a VLAN). On reuse, the primary's physical port is left untouched since it's already real hardware in the source config; only `descr`, `enable`, `ipaddr`, and `subnet` are set on it, and the secondary gets its own physical port field (defaults to the same port, editable for non-identical hardware).
+
 ## Deliberately out of scope (v1)
 
 - **Kea DHCP.** If the uploaded config's `dhcpbackend` is `kea`, the tool detects it and skips DHCP failover generation entirely rather than guessing at Kea's hot-standby/mTLS HA config, which is structurally different from the classic ISC `failover_peerip` mechanism and not compatible between backends (same finding as Heart's pfSense standard doc, Section 3). Flagged in the UI with a link to Netgate's docs.
 - **IPsec, OpenVPN, certificates.** Carried through to the secondary unchanged (not modified, not omitted). The tool flags their presence so you know to review whether anything there is endpoint-specific — it does not guess at what should change.
-- **Reusing an existing unused interface as SYNC.** The tool always creates a new dedicated interface, matching Heart's stated build convention. It doesn't offer repurposing an already-defined interface.
+- **Freeing up a physical port yourself** (e.g. moving an interface onto a VLAN to make room for SYNC) is on you to do first, on the real primary, before exporting the backup this tool reads. The tool doesn't restructure your interface layout — it only builds the HA pair from whatever layout is already in the file.
 
 ## Test fixtures
 

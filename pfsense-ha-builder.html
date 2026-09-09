@@ -179,14 +179,21 @@
     <p class="hint">Per Heart's build standard: a dedicated interface on a direct firewall-to-firewall connection, carrying pfsync state sync and the XMLRPC config-sync channel. No default gateway on this interface.</p>
     <div class="row">
       <div>
-        <label for="syncIfPrimary">Physical port — primary (e.g. igb3)</label>
+        <label for="syncSource">Source</label>
+        <select id="syncSource"></select>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="syncIfPrimary">Physical port — primary</label>
         <input type="text" id="syncIfPrimary" placeholder="igb3">
       </div>
       <div>
-        <label for="syncIfSecondary">Physical port — secondary (e.g. igb3)</label>
+        <label for="syncIfSecondary">Physical port — secondary</label>
         <input type="text" id="syncIfSecondary" placeholder="igb3">
       </div>
     </div>
+    <p class="hint" id="syncSourceHint"></p>
     <div class="row">
       <div>
         <label for="syncCidr">Point-to-point link subnet (CIDR)</label>
@@ -432,6 +439,23 @@ function analyzeConfig(doc) {
 
   const usedPhysIfs = new Set(interfaces.map(i => i.physIf).filter(Boolean));
 
+  // VLAN sub-interfaces store a *computed* identifier in <if> (parent + tag, e.g. mvneta1.2),
+  // defined by a separate top-level <vlans><vlan> entry. Editing that field without also
+  // updating the matching <vlans> entry produces a dangling reference, so flag it rather
+  // than let it be typed like a normal physical port name.
+  const vlanMap = new Map(); // vlanif -> {parentIf, tag}
+  const vlansEl = findChild(root, 'vlans');
+  if (vlansEl) {
+    for (const vlan of findChildren(vlansEl, 'vlan')) {
+      const vlanif = childText(vlan, 'vlanif');
+      if (vlanif) vlanMap.set(vlanif, { parentIf: childText(vlan, 'if'), tag: childText(vlan, 'tag') });
+    }
+  }
+  for (const iface of interfaces) {
+    const vlan = vlanMap.get(iface.physIf);
+    if (vlan) { iface.isVlan = true; iface.vlanParent = vlan.parentIf; iface.vlanTag = vlan.tag; }
+  }
+
   const vipEl = findChild(root, 'virtualip');
   const existingVips = [];
   const usedVhids = new Set();
@@ -502,7 +526,7 @@ function renderAnalysis(a) {
       ${a.interfaces.map(i => `
         <tr>
           <td>${escapeHtml(i.descr)} <span class="muted">(${i.key})</span></td>
-          <td>${escapeHtml(i.physIf)}</td>
+          <td>${escapeHtml(i.physIf)}${i.isVlan ? ` <span class="muted">(VLAN ${escapeHtml(i.vlanTag)} on ${escapeHtml(i.vlanParent)})</span>` : ''}</td>
           <td>${i.isStatic ? escapeHtml(i.ipaddr) + '/' + i.subnetBits : `<span class="muted">${escapeHtml(i.ipaddr || 'unset')}</span>`}</td>
           <td>${a.dhcpEnabledIfaces.includes(i.key) ? 'enabled' : ''}</td>
         </tr>`).join('')}
@@ -578,14 +602,25 @@ function renderForm(a) {
       </div>
       <div class="row">
         <div class="field-sm" style="flex:0 0 260px;">
-          <label for="phys_${iface.key}">Secondary physical port</label>
-          <input type="text" id="phys_${iface.key}" value="${escapeHtml(iface.physIf)}">
+          <label for="phys_${iface.key}">${iface.isVlan ? 'VLAN interface (fixed)' : 'Secondary physical port'}</label>
+          <input type="text" id="phys_${iface.key}" value="${escapeHtml(iface.physIf)}" ${iface.isVlan ? 'disabled' : ''}>
         </div>
       </div>
+      ${iface.isVlan ? `<p class="hint">VLAN ${escapeHtml(iface.vlanTag)} on trunk ${escapeHtml(iface.vlanParent)}, defined in this config's &lt;vlans&gt; section, which is carried through unchanged to both generated files. This matches automatically on same-model hardware. If the secondary's trunk port differs, edit the &lt;vlans&gt; section by hand after import — this tool doesn't remap it.</p>` : ''}
       <div id="err_${iface.key}"></div>
     `;
     cardsEl.appendChild(card);
   });
+
+  // sync section: source (new interface, or reuse an existing unused one)
+  const spareIfaces = a.interfaces.filter(i => i.ipaddr === null && !i.enabled);
+  const syncSourceEl = document.getElementById('syncSource');
+  syncSourceEl.innerHTML = [
+    `<option value="new">Create a new dedicated interface</option>`,
+    ...spareIfaces.map(i => `<option value="${i.key}">Reuse existing: ${escapeHtml(i.descr)} (${i.key}, ${escapeHtml(i.physIf)}) — currently unused</option>`),
+  ].join('');
+  syncSourceEl.addEventListener('change', () => applySyncSource(a));
+  applySyncSource(a);
 
   // sync section defaults
   recalcSyncIps();
@@ -598,6 +633,25 @@ function renderForm(a) {
   `).join('');
 
   renderDhcpSection(a);
+}
+
+function applySyncSource(a) {
+  const source = document.getElementById('syncSource').value;
+  const physPrimary = document.getElementById('syncIfPrimary');
+  const hint = document.getElementById('syncSourceHint');
+  if (source === 'new') {
+    physPrimary.disabled = false;
+    physPrimary.value = '';
+    physPrimary.placeholder = 'igb3';
+    document.getElementById('syncIfSecondary').value = '';
+    hint.textContent = '';
+  } else {
+    const iface = a.interfaces.find(i => i.key === source);
+    physPrimary.disabled = true;
+    physPrimary.value = iface.physIf;
+    document.getElementById('syncIfSecondary').value = iface.physIf;
+    hint.textContent = `Reusing the existing ${iface.key} slot already defined in this config — its physical port on the primary (${iface.physIf}) isn't editable here since that's already real hardware. Confirm the secondary's port matches, or change it if this pair isn't identical hardware.`;
+  }
 }
 
 function recalcSyncIps() {
@@ -679,6 +733,7 @@ function collectFormState() {
     advbase: parseInt(document.getElementById('carpAdvbase').value, 10) || 1,
     carpPassword: document.getElementById('carpPassword').value,
     perIface,
+    syncSource: document.getElementById('syncSource').value,
     syncIfPrimary: document.getElementById('syncIfPrimary').value.trim(),
     syncIfSecondary: document.getElementById('syncIfSecondary').value.trim(),
     syncCidr: document.getElementById('syncCidr').value.trim(),
@@ -726,7 +781,7 @@ function validateForm() {
   const cidr = parseCidr(s.syncCidr);
   if (!cidr) errs.push('SYNC interface: point-to-point subnet is not a valid CIDR.');
   if (!isValidIp(s.syncIpPrimary) || !isValidIp(s.syncIpSecondary)) errs.push('SYNC interface: primary/secondary IPs are invalid.');
-  if (analysis.usedPhysIfs.has(s.syncIfPrimary)) errs.push(`SYNC interface: physical port ${s.syncIfPrimary} is already used by another interface in this config.`);
+  if (s.syncSource === 'new' && analysis.usedPhysIfs.has(s.syncIfPrimary)) errs.push(`SYNC interface: physical port ${s.syncIfPrimary} is already used by another interface in this config.`);
 
   if (s.hasyncEnabled) {
     if (!s.hasyncUser) errs.push('HA Sync username is required.');
@@ -739,7 +794,7 @@ function validateForm() {
 function generateConfigs() {
   const s = collectFormState();
   const cidr = parseCidr(s.syncCidr);
-  const syncKey = nextOptKey(new Set(analysis.interfaces.map(i => i.key)));
+  const syncKey = s.syncSource !== 'new' ? s.syncSource : nextOptKey(new Set(analysis.interfaces.map(i => i.key)));
 
   const primaryDoc = new DOMParser().parseFromString(originalXmlText, 'application/xml');
   const secondaryDoc = new DOMParser().parseFromString(originalXmlText, 'application/xml');
@@ -795,14 +850,18 @@ function applyCommon(doc, role, s, cidr, syncKey) {
     vipEl.appendChild(vip);
   }
 
-  // --- dedicated SYNC interface ---
-  const syncEl = doc.createElement(syncKey);
-  setText(doc, syncEl, 'if', role === 'primary' ? s.syncIfPrimary : s.syncIfSecondary);
+  // --- dedicated SYNC interface: either a brand-new slot, or an existing unused one repurposed in place ---
+  const reusing = s.syncSource !== 'new';
+  let syncEl = reusing ? findChild(ifacesEl, syncKey) : null;
+  if (!syncEl) { syncEl = doc.createElement(syncKey); ifacesEl.appendChild(syncEl); }
+  // On reuse, the primary's physical port is already real hardware in the source config — leave it untouched.
+  if (!reusing || role === 'secondary') {
+    setText(doc, syncEl, 'if', role === 'primary' ? s.syncIfPrimary : s.syncIfSecondary);
+  }
   setText(doc, syncEl, 'descr', 'SYNC');
-  syncEl.appendChild(doc.createElement('enable'));
+  if (!findChild(syncEl, 'enable')) syncEl.appendChild(doc.createElement('enable'));
   setText(doc, syncEl, 'ipaddr', role === 'primary' ? s.syncIpPrimary : s.syncIpSecondary);
   setText(doc, syncEl, 'subnet', String(cidr.bits));
-  ifacesEl.appendChild(syncEl);
 
   // --- hasync (pfsync + config sync) ---
   const hasync = getOrCreateChild(doc, root, 'hasync');
