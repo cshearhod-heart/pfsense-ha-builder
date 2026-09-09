@@ -61,9 +61,15 @@ The point-to-point subnet is a base address plus a mask dropdown (not a typed CI
 
 The SYNC section offers two sources: **create a new dedicated interface** (the default), or **reuse an existing interface already defined in the config but currently unused** (no `<ipaddr>` and not enabled — e.g. a spare `optN` slot freed up by moving something else onto a VLAN). On reuse, the primary's physical port is left untouched since it's already real hardware in the source config; only `descr`, `enable`, `ipaddr`, and `subnet` are set on it, and the secondary gets its own physical port field (defaults to the same port, editable for non-identical hardware).
 
-## Deliberately out of scope (v1)
+## Kea DHCP HA
 
-- **Kea DHCP.** If the uploaded config's `dhcpbackend` is `kea`, the tool detects it and skips DHCP failover generation entirely rather than guessing at Kea's hot-standby/mTLS HA config, which is structurally different from the classic ISC `failover_peerip` mechanism and not compatible between backends (same finding as Heart's pfSense standard doc, Section 3). Flagged in the UI with a link to Netgate's docs.
+Kea's HA is a completely different mechanism from ISC's `failover_peerip` — a hot-standby control-plane relationship (`<kea><ha>`: `role` primary/standby, `localname`/`localip` vs `remotename`/`remoteip`, optional TLS), verified against pfSense's own Kea settings page and a real customer's working config. It rides the same dedicated SYNC link this tool already builds for pfsync, so no separate IP scheme is needed.
+
+- **Already configured** (existing `<kea><ha>` with no TLS): adopted as-is, exactly like existing CARP — the primary is never touched, and the secondary gets a matching block with `localip`/`remoteip` swapped and `role` flipped, mirroring pfSense's own config-sync transform (`rc.filter_synchronize`) precisely, including leaving `heartbeatdelay`/`maxresponsedelay`/`maxackdelay`/`maxunackedclients`/`maxrejectedleaseupdates` unchanged since pfSense's own sync engine doesn't touch those either.
+- **Not yet configured** (`dhcpbackend` is `kea`, no existing `<kea><ha>`): offered as an opt-in checkbox, building a fresh plaintext (no TLS) HA pair on the SYNC link.
+- **TLS or mutual TLS enabled**: skipped entirely and flagged clearly. `scertref`/`ccertref` are pfSense-internal certificate reference IDs that won't be valid on a new secondary — this tool won't guess at cert linkage. Configure that part by hand.
+
+## Deliberately out of scope (v1)
 - **IPsec, OpenVPN, certificates.** Carried through to the secondary unchanged (not modified, not omitted). The tool flags their presence so you know to review whether anything there is endpoint-specific — it does not guess at what should change.
 - **Freeing up a physical port yourself** (e.g. moving an interface onto a VLAN to make room for SYNC) is on you to do first, on the real primary, before exporting the backup this tool reads. The tool doesn't restructure your interface layout — it only builds the HA pair from whatever layout is already in the file.
 

@@ -381,14 +381,16 @@ function sameSubnet(ipA, ipB, bits) {
 // addresses, the current address itself, and — importantly — the interface's own DHCP
 // pool range if one exists, so the suggestion can't collide with a lease pfSense might
 // hand to an actual client.
-function suggestRealIps(iface, dhcpRange) {
+function suggestRealIps(iface, dhcpRange, extraExclude) {
   const mask = iface.subnetBits === 0 ? 0 : (0xFFFFFFFF << (32 - iface.subnetBits)) >>> 0;
   const netInt = (ipToInt(iface.ipaddr) & mask) >>> 0;
   const broadcastInt = (netInt | (~mask >>> 0)) >>> 0;
   const currentInt = ipToInt(iface.ipaddr);
+  const excludeInts = new Set((extraExclude || []).map(ipToInt).filter(n => n !== null));
   const found = [];
   for (let cand = netInt + 1; cand < broadcastInt && found.length < 2; cand++) {
     if (cand === currentInt) continue;
+    if (excludeInts.has(cand)) continue;
     if (dhcpRange && cand >= dhcpRange.from && cand <= dhcpRange.to) continue;
     found.push(intToIp(cand));
   }
@@ -481,6 +483,35 @@ function analyzeConfig(doc) {
   const dhcpBackend = childText(system, 'dhcpbackend') || 'isc'; // config.xml stores this under <system> in some builds and top-level in others
   const dhcpBackendTop = childText(root, 'dhcpbackend');
   const backend = dhcpBackendTop || dhcpBackend || 'isc';
+
+  // Kea's own HA mechanism (hot-standby control-plane peering) — verified against pfSense's
+  // Kea settings page (services_dhcp_settings.php) and a real customer's working config.
+  // Structurally unrelated to ISC's failover_peerip.
+  const keaEl = findChild(root, 'kea');
+  const keaHaEl = keaEl ? findChild(keaEl, 'ha') : null;
+  let existingKeaHa = null;
+  if (keaHaEl) {
+    existingKeaHa = {
+      enable: findChild(keaHaEl, 'enable') !== null,
+      role: childText(keaHaEl, 'role') || 'primary',
+      localname: childText(keaHaEl, 'localname') || '',
+      localip: childText(keaHaEl, 'localip') || '',
+      localport: childText(keaHaEl, 'localport') || '',
+      remotename: childText(keaHaEl, 'remotename') || '',
+      remoteip: childText(keaHaEl, 'remoteip') || '',
+      remoteport: childText(keaHaEl, 'remoteport') || '',
+      heartbeatdelay: childText(keaHaEl, 'heartbeatdelay') || '',
+      maxresponsedelay: childText(keaHaEl, 'maxresponsedelay') || '',
+      maxackdelay: childText(keaHaEl, 'maxackdelay') || '',
+      maxunackedclients: childText(keaHaEl, 'maxunackedclients') || '',
+      maxrejectedleaseupdates: childText(keaHaEl, 'maxrejectedleaseupdates') || '',
+      // pfSense's own convention for boolean fields is inconsistent (some use empty-tag
+      // presence, others literal text "on") and a real example with TLS enabled wasn't
+      // available to confirm which — check both rather than risk under-detecting "TLS is on".
+      tls: findChild(keaHaEl, 'tls') !== null || childText(keaHaEl, 'tls') === 'on',
+      mutualtls: findChild(keaHaEl, 'mutualtls') !== null || childText(keaHaEl, 'mutualtls') === 'on',
+    };
+  }
 
   const ifacesEl = findChild(root, 'interfaces');
   const interfaces = [];
@@ -599,7 +630,7 @@ function analyzeConfig(doc) {
     hostname, domain, backend,
     configVersion: childText(root, 'version') || root.getAttribute('version') || 'unknown',
     interfaces, usedPhysIfs, physIfOwner, existingVips, existingVipByInterface, usedVhids,
-    dhcpEnabledIfaces, dhcpRanges, existingFailoverPeerIp, existingHasync, existingHasyncDetails,
+    dhcpEnabledIfaces, dhcpRanges, existingFailoverPeerIp, existingHasync, existingHasyncDetails, existingKeaHa,
     ipsecTunnels, openvpnServers, openvpnClients, certCount,
   };
 }
@@ -702,7 +733,7 @@ function renderForm(a) {
       // adopted as-is from what's already live.
       ifaceRowState[iface.key] = { include: true, existing: true };
       const suggestedSecIp = a.existingFailoverPeerIp.get(iface.key)
-        || suggestRealIps(iface, a.dhcpRanges.get(iface.key))[0] || '';
+        || suggestRealIps(iface, a.dhcpRanges.get(iface.key), [existingVip.subnet])[0] || '';
       card.innerHTML = `
         <div class="iface-title">
           <input type="checkbox" id="inc_${iface.key}" checked>
@@ -918,12 +949,38 @@ function recalcSyncIps() {
 function renderDhcpSection(a) {
   const el = document.getElementById('dhcpSection');
   if (a.backend === 'kea') {
-    el.innerHTML = `<div class="callout danger">
-      DHCP backend is Kea — this tool does not generate Kea HA config in v1. Configure Kea's hot-standby HA
-      manually (System &gt; ... &gt; Kea DHCP HA, or see
-      <a href="https://docs.netgate.com/pfsense/en/latest/recipes/high-availability-kea-convert.html" target="_blank" rel="noopener">docs.netgate.com</a>).
-      Everything else generated below (CARP, sync interface, config sync) is unaffected.
-    </div>`;
+    if (a.existingKeaHa && (a.existingKeaHa.tls || a.existingKeaHa.mutualtls)) {
+      el.innerHTML = `<div class="callout danger">
+        Kea HA is configured with TLS${a.existingKeaHa.mutualtls ? '/mutual TLS' : ''} enabled
+        (<code>ha/scertref</code>${a.existingKeaHa.mutualtls ? '/<code>ha/ccertref</code>' : ''}). Those are pfSense-internal
+        certificate reference IDs that won't be valid on a new secondary — this tool won't guess at
+        cert linkage, so Kea HA is skipped here. Configure it manually per
+        <a href="https://docs.netgate.com/pfsense/en/latest/recipes/high-availability-kea-convert.html" target="_blank" rel="noopener">Netgate's guide</a>.
+        Everything else generated below (CARP, sync interface, config sync) is unaffected.
+      </div>`;
+      return;
+    }
+    if (a.existingKeaHa) {
+      el.innerHTML = `<div class="callout ok">
+        Kea HA is already configured (role: <code>${escapeHtml(a.existingKeaHa.role)}</code>,
+        local: <code>${escapeHtml(a.existingKeaHa.localname)} / ${escapeHtml(a.existingKeaHa.localip)}</code>,
+        remote: <code>${escapeHtml(a.existingKeaHa.remotename)} / ${escapeHtml(a.existingKeaHa.remoteip)}</code>) —
+        left untouched on the primary. The secondary gets a matching <code>&lt;kea&gt;&lt;ha&gt;</code> block
+        automatically, riding the same dedicated SYNC link (localip/remoteip swapped, role flipped to the
+        opposite of the primary's, matching exactly how pfSense's own config-sync engine transforms it).
+      </div>`;
+    } else {
+      el.innerHTML = `
+        <div class="checkbox-row">
+          <input type="checkbox" id="keaHaEnable" checked>
+          <label for="keaHaEnable" style="margin:0;">
+            Build Kea HA (hot-standby) using the same dedicated SYNC link — no existing
+            <code>&lt;kea&gt;&lt;ha&gt;</code> block was found in this config.
+          </label>
+        </div>
+        <p class="hint">Plaintext peering only (no TLS) — matching Netgate's and Heart's own simplest working setup. If you need TLS/mutual TLS, configure that by hand afterward; this tool won't generate cert linkage.</p>
+      `;
+    }
     return;
   }
   const dhcpIfaces = a.interfaces.filter(i => a.dhcpEnabledIfaces.includes(i.key) && i.isStatic);
@@ -1025,6 +1082,10 @@ function collectFormState() {
           && document.getElementById('dhcpfo_' + i.key) && document.getElementById('dhcpfo_' + i.key).checked)
           .map(i => i.key)
       : [],
+    keaHaMode: analysis.backend !== 'kea' ? 'skip'
+      : (analysis.existingKeaHa && (analysis.existingKeaHa.tls || analysis.existingKeaHa.mutualtls)) ? 'skip'
+      : analysis.existingKeaHa ? 'adopt'
+      : (document.getElementById('keaHaEnable') && document.getElementById('keaHaEnable').checked) ? 'fresh' : 'skip',
   };
 }
 
@@ -1207,6 +1268,52 @@ function applyCommon(doc, role, s, cidr, syncKey, existingSyncActive) {
     }
   }
 
+  // --- Kea HA (hot-standby control-plane peering, rides the same dedicated SYNC link) ---
+  // Verified against pfSense's Kea settings page (services_dhcp_settings.php) and a real
+  // customer's working config: <kea><ha> with role primary/standby, localname/localip vs
+  // remotename/remoteip. pfSense's own sync engine (rc.filter_synchronize) swaps
+  // localip<->remoteip and localname->remotename, flips role, and never touches
+  // heartbeatdelay/maxresponsedelay/maxackdelay/maxunackedclients/maxrejectedleaseupdates —
+  // this mirrors that transform exactly rather than guessing at it.
+  if (s.keaHaMode === 'adopt') {
+    if (role === 'secondary') {
+      const existing = analysis.existingKeaHa;
+      const kea = getOrCreateChild(doc, root, 'kea');
+      const ha = getOrCreateChild(doc, kea, 'ha');
+      for (const tag of ['enable', 'role', 'localname', 'localip', 'localport', 'remotename', 'remoteip', 'remoteport']) removeChildTag(ha, tag);
+      if (existing.enable) ha.appendChild(doc.createElement('enable'));
+      setText(doc, ha, 'role', existing.role === 'primary' ? 'standby' : 'primary');
+      setText(doc, ha, 'localname', s.secHostname);
+      setText(doc, ha, 'localip', s.syncIpSecondary);
+      setText(doc, ha, 'remotename', existing.localname);
+      setText(doc, ha, 'remoteip', s.syncIpPrimary);
+      if (existing.remoteport) setText(doc, ha, 'localport', existing.remoteport);
+      if (existing.localport) setText(doc, ha, 'remoteport', existing.localport);
+      for (const tag of ['heartbeatdelay', 'maxresponsedelay', 'maxackdelay', 'maxunackedclients', 'maxrejectedleaseupdates']) {
+        if (existing[tag]) setText(doc, ha, tag, existing[tag]);
+      }
+    }
+    // role === 'primary': already correct and live — don't touch it at all.
+  } else if (s.keaHaMode === 'fresh') {
+    const kea = getOrCreateChild(doc, root, 'kea');
+    const ha = getOrCreateChild(doc, kea, 'ha');
+    for (const tag of ['enable', 'role', 'localname', 'localip', 'remotename', 'remoteip']) removeChildTag(ha, tag);
+    ha.appendChild(doc.createElement('enable'));
+    if (role === 'primary') {
+      setText(doc, ha, 'role', 'primary');
+      setText(doc, ha, 'localname', analysis.hostname);
+      setText(doc, ha, 'localip', s.syncIpPrimary);
+      setText(doc, ha, 'remotename', s.secHostname);
+      setText(doc, ha, 'remoteip', s.syncIpSecondary);
+    } else {
+      setText(doc, ha, 'role', 'standby');
+      setText(doc, ha, 'localname', s.secHostname);
+      setText(doc, ha, 'localip', s.syncIpSecondary);
+      setText(doc, ha, 'remotename', analysis.hostname);
+      setText(doc, ha, 'remoteip', s.syncIpPrimary);
+    }
+  }
+
   // --- DHCP failover ---
   if (s.dhcpFailover.length) {
     const dhcpd = getOrCreateChild(doc, root, 'dhcpd');
@@ -1265,7 +1372,11 @@ function renderOutput(result) {
 
   let warnings = '';
   if (analysis.backend === 'kea') {
-    warnings += `<div class="callout danger">Kea DHCP HA was not configured — see step 4.</div>`;
+    if (s.keaHaMode === 'skip') {
+      warnings += `<div class="callout danger">Kea DHCP HA was not configured — see step 4 for why.</div>`;
+    } else {
+      warnings += `<div class="callout ok">Kea HA ${s.keaHaMode === 'adopt' ? 'matched to the existing config' : 'built fresh'} on the dedicated SYNC link, role ${s.keaHaMode === 'adopt' ? `flipped from the primary's existing role` : 'primary/standby'}.</div>`;
+    }
   }
   const outOfScope = [];
   if (analysis.ipsecTunnels) outOfScope.push('IPsec');

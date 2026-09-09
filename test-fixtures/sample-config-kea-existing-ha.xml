@@ -1,0 +1,87 @@
+<?xml version="1.0"?>
+<!-- Synthetic pfSense config.xml: Kea DHCP backend, with Kea HA (hot-standby) AND
+     CARP/hasync all already configured and riding the same dedicated SYNC link.
+     Structure informed by a real customer's working Kea HA config (fields verified,
+     values here are entirely fake). -->
+<pfsense>
+	<version>24.6</version>
+	<system>
+		<hostname>fw-kea-ha</hostname>
+		<domain>lab.internal</domain>
+		<dhcpbackend>kea</dhcpbackend>
+	</system>
+	<interfaces>
+		<wan>
+			<if>igb0</if>
+			<descr>WAN</descr>
+			<enable></enable>
+			<ipaddr>dhcp</ipaddr>
+		</wan>
+		<lan>
+			<if>igb1</if>
+			<descr>LAN</descr>
+			<enable></enable>
+			<ipaddr>10.10.10.2</ipaddr>
+			<subnet>24</subnet>
+		</lan>
+		<opt1>
+			<if>igb2</if>
+			<descr>SYNC</descr>
+			<enable></enable>
+			<ipaddr>10.255.255.1</ipaddr>
+			<subnet>30</subnet>
+		</opt1>
+	</interfaces>
+	<dhcpd>
+		<lan>
+			<enable></enable>
+			<range>
+				<from>10.10.10.100</from>
+				<to>10.10.10.200</to>
+			</range>
+			<failover_peerip></failover_peerip>
+			<gateway>10.10.10.1</gateway>
+		</lan>
+	</dhcpd>
+	<virtualip>
+		<vip>
+			<mode>carp</mode>
+			<interface>lan</interface>
+			<type>single</type>
+			<subnet>10.10.10.1</subnet>
+			<subnet_bits>24</subnet_bits>
+			<descr>CARP - LAN</descr>
+			<password>ExistingCarpPass1</password>
+			<vhid>7</vhid>
+			<advbase>1</advbase>
+			<advskew>0</advskew>
+			<uniqid>abc123def456</uniqid>
+		</vip>
+	</virtualip>
+	<hasync>
+		<pfsyncenabled>on</pfsyncenabled>
+		<pfsyncinterface>opt1</pfsyncinterface>
+		<pfsyncpeerip>10.255.255.2</pfsyncpeerip>
+		<synchronizetoip>10.255.255.2</synchronizetoip>
+		<username>admin</username>
+		<password>ExistingHaSyncSecret1</password>
+		<synchronizerules>on</synchronizerules>
+		<synchronizevirtualip>on</synchronizevirtualip>
+		<synchronizedhcpd>on</synchronizedhcpd>
+	</hasync>
+	<kea>
+		<ha>
+			<localname>fw-kea-ha</localname>
+			<localip>10.255.255.1</localip>
+			<remotename>fw-kea-ha-b</remotename>
+			<remoteip>10.255.255.2</remoteip>
+			<enable></enable>
+			<role>primary</role>
+		</ha>
+	</kea>
+	<revision>
+		<time>1799000000</time>
+		<description>Synthetic fixture: Kea backend with existing Kea HA + CARP + hasync</description>
+		<username>admin@lab.internal</username>
+	</revision>
+</pfsense>
