@@ -25,6 +25,10 @@ In "reuse" mode, the primary's new IP and the secondary's IP are pre-filled with
 
 The CARP group password is pre-filled with a random 16-character value (`crypto.getRandomValues()` — the browser's own CSPRNG, not fetched from anywhere) — reveal it with the password field's own eye icon, or replace it. Kept to 16 characters deliberately: FreeBSD's CARP key buffer (`CARP_KEY_LEN` in `sys/netinet/ip_carp.h`) is 20 bytes copied with `strlcpy`, so anything past 19 characters is silently truncated by the kernel with no error.
 
+## Import both files close together
+
+ISC DHCP failover has a deliberate fail-safe (confirmed against Netgate's own troubleshooting docs): if a server can't reach its failover peer at startup, it intentionally stops issuing *new* leases rather than risk a conflicting assignment. This is not a config error, and CARP/pfsync are completely unaffected — it's DHCP-specific. Bring both firewalls up close together, ideally with a fresh lease database on each (Netgate's own recommendation). If one side needs to serve DHCP standalone before the other is ready, clear its "Failover peer IP" field temporarily and re-add it once the peer is reachable.
+
 ## What it generates
 
 - **CARP virtual IPs** (`virtualip/vip`, `mode=carp`) for each selected interface, with VHIDs chosen to avoid colliding with anything already in the source config.

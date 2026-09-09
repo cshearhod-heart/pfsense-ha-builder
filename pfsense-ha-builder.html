@@ -818,7 +818,19 @@ function renderDhcpSection(a) {
     el.innerHTML = `<p class="muted">No DHCP-enabled interfaces with a static IP were found in this config — nothing to configure here.</p>`;
     return;
   }
-  el.innerHTML = dhcpIfaces.map(iface => `
+  el.innerHTML = `
+    <div class="callout warn">
+      <strong>Import both files close together, or expect DHCP to briefly stop handing out new leases.</strong>
+      ISC DHCP failover has a deliberate fail-safe: if a server can't reach its failover peer at startup,
+      it intentionally stops issuing <em>new</em> leases rather than risk a conflicting assignment
+      (<a href="https://docs.netgate.com/pfsense/en/latest/troubleshooting/ha-dhcp-failover.html" target="_blank" rel="noopener">Netgate's own troubleshooting doc</a>).
+      This is not a config error and CARP/pfsync are unaffected — it only affects DHCP.
+      Netgate recommends bringing both firewalls up together with a fresh lease database when possible.
+      If you need one side serving DHCP standalone before the other is ready, clear its
+      <strong>Failover peer IP</strong> field temporarily (Services &gt; DHCP Server &gt; &lt;interface&gt;)
+      and re-add it once the peer is reachable.
+    </div>
+  ` + dhcpIfaces.map(iface => `
     <div class="checkbox-row">
       <input type="checkbox" id="dhcpfo_${iface.key}" checked>
       <label for="dhcpfo_${iface.key}" style="margin:0;">
@@ -1102,6 +1114,16 @@ function renderOutput(result) {
   if (analysis.certCount) outOfScope.push('certificates');
   if (outOfScope.length) {
     warnings += `<div class="callout info">${outOfScope.join(', ')} were carried through unchanged — review whether anything there is endpoint-specific before going live.</div>`;
+  }
+  if (s.dhcpFailover.length) {
+    warnings += `<div class="callout warn">
+      <strong>Import both files close together.</strong> ISC DHCP failover intentionally stops issuing
+      <em>new</em> leases if it can't reach its peer at startup (a fail-safe, not a bug —
+      <a href="https://docs.netgate.com/pfsense/en/latest/troubleshooting/ha-dhcp-failover.html" target="_blank" rel="noopener">Netgate's docs</a>).
+      CARP/pfsync are unaffected. If you must bring the secondary up later, temporarily clear
+      <strong>Failover peer IP</strong> on ${s.dhcpFailover.map(k => escapeHtml(s.perIface.find(r => r.iface.key === k).iface.descr)).join(', ')}
+      until it's reachable.
+    </div>`;
   }
   const reuseRows = s.perIface.filter(r => r.mode === 'reuse');
   const reuseDhcpRows = reuseRows.filter(r => analysis.dhcpEnabledIfaces.includes(r.iface.key));
