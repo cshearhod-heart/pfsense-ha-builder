@@ -12,6 +12,15 @@ Open `pfsense-ha-builder.html` in any browser. Nothing is uploaded — parsing, 
 4. Review the config-sync (XMLRPC) sections and DHCP failover options.
 5. Generate, review the summary and raw XML, download both files.
 
+## VIP strategy: reuse the current IP, or assign a new one
+
+CARP only protects whatever address downstream devices actually point at. For each interface you choose between:
+
+- **Current IP becomes the VIP (default/recommended).** Both firewalls get new real IPs; the address every downstream device, DHCP lease, and static route already uses keeps working unchanged, because it's now the floating one. This is Netgate's own standard HA pattern.
+- **Keep the current IP on the primary; the VIP is a new address.** Simpler to reason about, but anything downstream still pointed at the current address gets *no* HA protection until it's manually repointed at the new VIP — the tool flags this in the output warnings per interface, but can't fix it for you.
+
+When reusing the current IP, the tool also sets `dhcpd/<iface>/gateway` explicitly to the VIP on interfaces with DHCP enabled. Without this, pfSense falls back to handing out its own interface IP as the DHCP-issued default gateway (confirmed in `services.inc`) — which after the swap would be the *new, non-floating* address, quietly breaking failover for every DHCP client on that segment.
+
 ## What it generates
 
 - **CARP virtual IPs** (`virtualip/vip`, `mode=carp`) for each selected interface, with VHIDs chosen to avoid colliding with anything already in the source config.

@@ -425,19 +425,28 @@ function analyzeConfig(doc) {
       const key = node.nodeName;
       const ipaddr = childText(node, 'ipaddr');
       const isStatic = isValidIp(ipaddr);
+      const enabled = findChild(node, 'enable') !== null;
+      // A slot can be *defined* (carries a physical port tag) without being *configured* —
+      // no address of any kind and not enabled. That's a genuinely free port, not a collision.
+      const isSpare = ipaddr === null && !enabled;
       interfaces.push({
         key,
         physIf: childText(node, 'if') || '',
         descr: childText(node, 'descr') || key.toUpperCase(),
         ipaddr: ipaddr,
         subnetBits: node && childText(node, 'subnet') ? parseInt(childText(node, 'subnet'), 10) : null,
-        enabled: findChild(node, 'enable') !== null,
+        enabled,
         isStatic,
+        isSpare,
       });
     }
   }
 
+  // A port already tagged to ANY interface entry is claimed at the pfSense assignment level,
+  // configured or not — assigning it to a second, separate interface key would be a real
+  // conflict (two logical interfaces on one physical NIC), not just an unconfigured spare.
   const usedPhysIfs = new Set(interfaces.map(i => i.physIf).filter(Boolean));
+  const physIfOwner = new Map(interfaces.filter(i => i.physIf).map(i => [i.physIf, i]));
 
   // VLAN sub-interfaces store a *computed* identifier in <if> (parent + tag, e.g. mvneta1.2),
   // defined by a separate top-level <vlans><vlan> entry. Editing that field without also
@@ -494,7 +503,7 @@ function analyzeConfig(doc) {
   return {
     hostname, domain, backend,
     configVersion: childText(root, 'version') || root.getAttribute('version') || 'unknown',
-    interfaces, usedPhysIfs, existingVips, usedVhids, dhcpEnabledIfaces, existingHasync,
+    interfaces, usedPhysIfs, physIfOwner, existingVips, usedVhids, dhcpEnabledIfaces, existingHasync,
     ipsecTunnels, openvpnServers, openvpnClients, certCount,
   };
 }
@@ -580,15 +589,24 @@ function renderForm(a) {
         <input type="checkbox" id="inc_${iface.key}" checked>
         <label for="inc_${iface.key}" style="margin:0;">${escapeHtml(iface.descr)}</label>
         <span class="badge">${iface.key}</span>
-        <span class="badge">${escapeHtml(iface.ipaddr)}/${iface.subnetBits}</span>
+        <span class="badge">current: ${escapeHtml(iface.ipaddr)}/${iface.subnetBits}</span>
       </div>
       <div class="row">
-        <div>
-          <label>Primary IP (unchanged)</label>
-          <input type="text" value="${escapeHtml(iface.ipaddr)}" disabled>
+        <div style="flex:0 0 100%;">
+          <label for="mode_${iface.key}">VIP strategy</label>
+          <select id="mode_${iface.key}">
+            <option value="reuse">Current IP becomes the CARP VIP (recommended) — both firewalls get new real IPs; nothing downstream needs to change</option>
+            <option value="new">Keep the current IP as the primary's real IP; the VIP is a new address</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div id="pipWrap_${iface.key}">
+          <label for="pip_${iface.key}">Primary's new real IP</label>
+          <input type="text" id="pip_${iface.key}">
         </div>
         <div>
-          <label for="sip_${iface.key}">Secondary IP</label>
+          <label for="sip_${iface.key}">Secondary's real IP</label>
           <input type="text" id="sip_${iface.key}">
         </div>
         <div>
@@ -610,10 +628,12 @@ function renderForm(a) {
       <div id="err_${iface.key}"></div>
     `;
     cardsEl.appendChild(card);
+    document.getElementById('mode_' + iface.key).addEventListener('change', () => applyIfaceMode(iface));
+    applyIfaceMode(iface);
   });
 
   // sync section: source (new interface, or reuse an existing unused one)
-  const spareIfaces = a.interfaces.filter(i => i.ipaddr === null && !i.enabled);
+  const spareIfaces = a.interfaces.filter(i => i.isSpare);
   const syncSourceEl = document.getElementById('syncSource');
   syncSourceEl.innerHTML = [
     `<option value="new">Create a new dedicated interface</option>`,
@@ -633,6 +653,25 @@ function renderForm(a) {
   `).join('');
 
   renderDhcpSection(a);
+}
+
+function applyIfaceMode(iface) {
+  const mode = document.getElementById('mode_' + iface.key).value;
+  const pipWrap = document.getElementById('pipWrap_' + iface.key);
+  const pipInput = document.getElementById('pip_' + iface.key);
+  const vipInput = document.getElementById('vip_' + iface.key);
+  if (mode === 'reuse') {
+    pipWrap.hidden = false;
+    pipInput.disabled = false;
+    vipInput.value = iface.ipaddr;
+    vipInput.disabled = true;
+  } else {
+    pipWrap.hidden = true;
+    pipInput.disabled = true;
+    pipInput.value = '';
+    vipInput.disabled = false;
+    if (vipInput.value === iface.ipaddr) vipInput.value = '';
+  }
 }
 
 function applySyncSource(a) {
@@ -720,13 +759,19 @@ document.getElementById('generateBtn').addEventListener('click', () => {
 
 function collectFormState() {
   const included = analysis.interfaces.filter(i => i.isStatic && document.getElementById('inc_' + i.key).checked);
-  const perIface = included.map(iface => ({
-    iface,
-    secIp: document.getElementById('sip_' + iface.key).value.trim(),
-    vip: document.getElementById('vip_' + iface.key).value.trim(),
-    vhid: parseInt(document.getElementById('vhid_' + iface.key).value, 10),
-    secPhysIf: document.getElementById('phys_' + iface.key).value.trim(),
-  }));
+  const perIface = included.map(iface => {
+    const mode = document.getElementById('mode_' + iface.key).value; // 'reuse': current IP becomes the VIP; 'new': primary keeps current IP
+    const primaryIp = mode === 'reuse' ? document.getElementById('pip_' + iface.key).value.trim() : iface.ipaddr;
+    return {
+      iface,
+      mode,
+      primaryIp,
+      secIp: document.getElementById('sip_' + iface.key).value.trim(),
+      vip: document.getElementById('vip_' + iface.key).value.trim(),
+      vhid: parseInt(document.getElementById('vhid_' + iface.key).value, 10),
+      secPhysIf: document.getElementById('phys_' + iface.key).value.trim(),
+    };
+  });
   return {
     secHostname: document.getElementById('secHostname').value.trim(),
     secDomain: document.getElementById('secDomain').value.trim(),
@@ -764,12 +809,15 @@ function validateForm() {
   const seenVhids = new Set();
   for (const row of s.perIface) {
     const label = row.iface.descr;
+    if (row.mode === 'reuse' && !isValidIp(row.primaryIp)) errs.push(`${label}: primary's new real IP is missing or invalid.`);
     if (!isValidIp(row.secIp)) errs.push(`${label}: secondary IP is missing or invalid.`);
     if (!isValidIp(row.vip)) errs.push(`${label}: CARP VIP is missing or invalid.`);
-    if (isValidIp(row.secIp) && row.secIp === row.iface.ipaddr) errs.push(`${label}: secondary IP must differ from the primary's IP.`);
-    if (isValidIp(row.vip) && (row.vip === row.iface.ipaddr || row.vip === row.secIp)) errs.push(`${label}: CARP VIP must differ from both real IPs.`);
-    if (isValidIp(row.secIp) && !sameSubnet(row.secIp, row.iface.ipaddr, row.iface.subnetBits)) errs.push(`${label}: secondary IP is not in the same /${row.iface.subnetBits} as the primary.`);
-    if (isValidIp(row.vip) && !sameSubnet(row.vip, row.iface.ipaddr, row.iface.subnetBits)) errs.push(`${label}: CARP VIP is not in the same /${row.iface.subnetBits} as the primary.`);
+    if (isValidIp(row.primaryIp) && isValidIp(row.secIp) && row.primaryIp === row.secIp) errs.push(`${label}: primary and secondary real IPs must differ.`);
+    if (isValidIp(row.vip) && (row.vip === row.primaryIp || row.vip === row.secIp)) errs.push(`${label}: CARP VIP must differ from both real IPs.`);
+    if (row.mode === 'reuse' && isValidIp(row.primaryIp) && row.primaryIp === row.iface.ipaddr) errs.push(`${label}: primary's new real IP must differ from the current address (which is becoming the VIP).`);
+    if (isValidIp(row.primaryIp) && !sameSubnet(row.primaryIp, row.iface.ipaddr, row.iface.subnetBits)) errs.push(`${label}: primary's real IP is not in the same /${row.iface.subnetBits} as the current address.`);
+    if (isValidIp(row.secIp) && !sameSubnet(row.secIp, row.iface.ipaddr, row.iface.subnetBits)) errs.push(`${label}: secondary IP is not in the same /${row.iface.subnetBits} as the current address.`);
+    if (isValidIp(row.vip) && !sameSubnet(row.vip, row.iface.ipaddr, row.iface.subnetBits)) errs.push(`${label}: CARP VIP is not in the same /${row.iface.subnetBits} as the current address.`);
     if (!(row.vhid >= 1 && row.vhid <= 255)) errs.push(`${label}: VHID must be between 1 and 255.`);
     if (seenVhids.has(row.vhid)) errs.push(`${label}: VHID ${row.vhid} is used more than once in this session.`);
     seenVhids.add(row.vhid);
@@ -781,7 +829,14 @@ function validateForm() {
   const cidr = parseCidr(s.syncCidr);
   if (!cidr) errs.push('SYNC interface: point-to-point subnet is not a valid CIDR.');
   if (!isValidIp(s.syncIpPrimary) || !isValidIp(s.syncIpSecondary)) errs.push('SYNC interface: primary/secondary IPs are invalid.');
-  if (s.syncSource === 'new' && analysis.usedPhysIfs.has(s.syncIfPrimary)) errs.push(`SYNC interface: physical port ${s.syncIfPrimary} is already used by another interface in this config.`);
+  if (s.syncSource === 'new' && analysis.usedPhysIfs.has(s.syncIfPrimary)) {
+    const owner = analysis.physIfOwner.get(s.syncIfPrimary);
+    const ownerDesc = owner ? `${owner.descr} (${owner.key})` : 'another interface';
+    const suggestion = owner && owner.isSpare
+      ? ` That slot has no address configured, so pick "Reuse existing: ${escapeHtml(owner.descr)}" from the Source dropdown above instead of creating a new interface for the same port.`
+      : ' Free it up first (e.g. move that interface onto a VLAN or a different port), or pick a different port.';
+    errs.push(`SYNC interface: physical port ${s.syncIfPrimary} is already assigned to ${ownerDesc} at the pfSense interface-assignment level, even though it may be unconfigured.${suggestion}`);
+  }
 
   if (s.hasyncEnabled) {
     if (!s.hasyncUser) errs.push('HA Sync username is required.');
@@ -820,11 +875,16 @@ function applyCommon(doc, role, s, cidr, syncKey) {
     setText(doc, system, 'domain', s.secDomain);
   }
 
-  // --- per-interface real IPs (secondary only) + physical port overrides ---
+  // --- per-interface real IPs + physical port overrides ---
+  // In 'reuse' mode the current address becomes the VIP, so the primary's own ipaddr
+  // changes too (to row.primaryIp) — not just the secondary's.
   const ifacesEl = getOrCreateChild(doc, root, 'interfaces');
   for (const row of s.perIface) {
     const ifEl = findChild(ifacesEl, row.iface.key);
     if (!ifEl) continue;
+    if (role === 'primary' && row.mode === 'reuse') {
+      setText(doc, ifEl, 'ipaddr', row.primaryIp);
+    }
     if (role === 'secondary') {
       setText(doc, ifEl, 'ipaddr', row.secIp);
       setText(doc, ifEl, 'if', row.secPhysIf);
@@ -892,9 +952,23 @@ function applyCommon(doc, role, s, cidr, syncKey) {
       const dhcpIfEl = findChild(dhcpd, key);
       if (!dhcpIfEl) continue;
       const row = s.perIface.find(r => r.iface.key === key);
-      const peerIp = role === 'primary' ? row.secIp : row.iface.ipaddr;
+      const peerIp = role === 'primary' ? row.secIp : row.primaryIp;
       setText(doc, dhcpIfEl, 'failover_peerip', peerIp);
     }
+  }
+
+  // --- DHCP gateway override for 'reuse'-mode interfaces ---
+  // pfSense's DHCP server hands out its own interface IP as the default gateway unless
+  // <dhcpd><iface><gateway> is explicitly set (confirmed in services.inc: it falls back to
+  // $ifcfgip when empty). In 'reuse' mode the interface's real IP is no longer the floating
+  // address, so leaving this blank would hand DHCP clients the non-floating IP as their
+  // gateway — quietly defeating HA for every DHCP client on that segment.
+  const dhcpdGw = getOrCreateChild(doc, root, 'dhcpd');
+  for (const row of s.perIface) {
+    if (row.mode !== 'reuse' || !analysis.dhcpEnabledIfaces.includes(row.iface.key)) continue;
+    const dhcpIfEl = findChild(dhcpdGw, row.iface.key);
+    if (!dhcpIfEl) continue;
+    setText(doc, dhcpIfEl, 'gateway', row.iface.ipaddr);
   }
 
   // --- revision bump ---
@@ -926,6 +1000,23 @@ function renderOutput(result) {
   if (outOfScope.length) {
     warnings += `<div class="callout info">${outOfScope.join(', ')} were carried through unchanged — review whether anything there is endpoint-specific before going live.</div>`;
   }
+  const reuseRows = s.perIface.filter(r => r.mode === 'reuse');
+  const reuseDhcpRows = reuseRows.filter(r => analysis.dhcpEnabledIfaces.includes(r.iface.key));
+  if (reuseDhcpRows.length) {
+    warnings += `<div class="callout ok">
+      DHCP gateway override set automatically for ${reuseDhcpRows.map(r => escapeHtml(r.iface.descr)).join(', ')}
+      (<code>dhcpd/&lt;iface&gt;/gateway</code> = the VIP) — without this, pfSense would hand DHCP clients the
+      new non-floating real IP as their gateway instead of the floating one, quietly defeating HA for them.
+    </div>`;
+  }
+  const newModeRows = s.perIface.filter(r => r.mode === 'new');
+  if (newModeRows.length) {
+    warnings += `<div class="callout warn">
+      ${newModeRows.map(r => escapeHtml(r.iface.descr)).join(', ')} kept the current IP on the primary with a
+      brand-new VIP. Anything downstream still pointed at the <em>current</em> address (static routes, DNS,
+      monitoring, non-DHCP clients) gets no HA protection unless it's repointed at the new VIP.
+    </div>`;
+  }
   warnings += `<div class="callout warn">
     <strong>Test on lab hardware first.</strong> Import the secondary file onto a factory-reset or otherwise
     non-production unit — never onto a box already serving live traffic. Review the primary's diff before
@@ -938,8 +1029,8 @@ function renderOutput(result) {
       <tr><th>Interface</th><th>Primary IP</th><th>Secondary IP</th><th>CARP VIP</th><th>VHID</th></tr>
       ${s.perIface.map(r => `
         <tr>
-          <td>${escapeHtml(r.iface.descr)}</td>
-          <td>${escapeHtml(r.iface.ipaddr)}</td>
+          <td>${escapeHtml(r.iface.descr)} <span class="muted">(${r.mode === 'reuse' ? 'VIP = current IP' : 'VIP is new'})</span></td>
+          <td>${escapeHtml(r.primaryIp)}</td>
           <td>${escapeHtml(r.secIp)}</td>
           <td>${escapeHtml(r.vip)}</td>
           <td>${r.vhid} <span class="muted">(secondary advskew: 100)</span></td>
