@@ -12,6 +12,15 @@ Open `pfsense-ha-builder.html` in any browser. Nothing is uploaded — parsing, 
 4. Review the config-sync (XMLRPC) sections and DHCP failover options.
 5. Generate, review the summary and raw XML, download both files.
 
+## Primary already has HA configured
+
+If the uploaded config already has a CARP VIP on an interface, or `hasync` already pointed at a live pfsync interface, that interface's card and the SYNC section adapt automatically — nothing already-live is re-derived or touched on the primary:
+
+- **A per-interface existing VIP** shows a simplified card: no VIP-strategy choice, no VHID/password to set — those are adopted exactly as they already are. Only the secondary's real IP and physical port are asked for (pre-filled from the existing `failover_peerip` when one reveals what the secondary's address was already meant to be). The secondary gets a matching VIP with the same VHID/password/advbase and `advskew` = existing + 100, mirroring pfSense's own sync-engine transform exactly.
+- **An already-active pfsync interface** (found via `hasync/pfsyncinterface` pointing at a real, non-spare interface) locks the whole SYNC section to that interface — physical port, base address, and mask all become read-only, and the secondary's IP is pre-filled from the primary's existing `pfsyncpeerip`/`synchronizetoip` if they're consistent.
+- **HA Sync username/password/sections** get pre-filled from the existing `hasync` block rather than asked for fresh.
+- Any *other* CARP-eligible interface without an existing VIP still gets the normal fresh-build flow — the two modes coexist per-interface, since real rollouts often add HA to one interface at a time.
+
 ## VIP strategy: reuse the current IP, or assign a new one
 
 CARP only protects whatever address downstream devices actually point at. For each interface you choose between:

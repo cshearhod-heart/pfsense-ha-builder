@@ -248,6 +248,7 @@
       </div>
     </div>
     <p class="hint">This must be a webConfigurator user with the same username/password on <strong>both</strong> firewalls. This tool records the intended credentials in the config — it does not create the user account.</p>
+    <p class="hint" id="hasyncExistingHint"></p>
     <p class="hint">Sections to synchronize:</p>
     <div class="checkbox-grid" id="syncSections"></div>
   </section>
@@ -422,8 +423,10 @@ const HASYNC_SECTIONS = [
   ['synchronizeusers', 'Users'],
   ['synchronizeauthservers', 'Auth servers'],
   ['synchronizecerts', 'Certificates'],
-  ['synchronizedhcpd', 'DHCP server'],
+  ['synchronizedhcpd', 'DHCP server (v4 — also covers Kea v4 HA settings)'],
   ['synchronizedhcrelay', 'DHCP relay'],
+  ['synchronizekea6', 'Kea DHCPv6 HA settings'],
+  ['synchronizedhcrelay6', 'DHCP relay (v6)'],
   ['synchronizewol', 'Wake on LAN'],
   ['synchronizeipsec', 'IPsec'],
   ['synchronizeopenvpn', 'OpenVPN'],
@@ -529,6 +532,7 @@ function analyzeConfig(doc) {
 
   const vipEl = findChild(root, 'virtualip');
   const existingVips = [];
+  const existingVipByInterface = new Map(); // interface key -> full existing VIP, so a secondary can match it exactly
   const usedVhids = new Set();
   if (vipEl) {
     for (const vip of findChildren(vipEl, 'vip')) {
@@ -536,12 +540,18 @@ function analyzeConfig(doc) {
       const vhid = childText(vip, 'vhid');
       if (vhid) usedVhids.add(parseInt(vhid, 10));
       if (mode === 'carp') {
-        existingVips.push({
+        const detail = {
           interface: childText(vip, 'interface'),
           subnet: childText(vip, 'subnet'),
-          vhid,
-          advskew: childText(vip, 'advskew'),
-        });
+          subnetBits: parseInt(childText(vip, 'subnet_bits'), 10),
+          vhid: parseInt(vhid, 10),
+          advskew: parseInt(childText(vip, 'advskew'), 10) || 0,
+          advbase: parseInt(childText(vip, 'advbase'), 10) || 1,
+          password: childText(vip, 'password') || '',
+          descr: childText(vip, 'descr') || '',
+        };
+        existingVips.push(detail);
+        existingVipByInterface.set(detail.interface, detail);
       }
     }
   }
@@ -549,6 +559,7 @@ function analyzeConfig(doc) {
   const dhcpdEl = findChild(root, 'dhcpd');
   const dhcpEnabledIfaces = [];
   const dhcpRanges = new Map(); // key -> {from, to} ints, so address suggestion can avoid the active pool
+  const existingFailoverPeerIp = new Map(); // key -> ip already configured, revealing the secondary's expected address
   if (dhcpdEl) {
     for (const node of dhcpdEl.childNodes) {
       if (node.nodeType !== 1) continue;
@@ -559,10 +570,25 @@ function analyzeConfig(doc) {
         const to = ipToInt(childText(rangeEl, 'to'));
         if (from !== null && to !== null) dhcpRanges.set(node.nodeName, { from, to });
       }
+      const fpi = childText(node, 'failover_peerip');
+      if (isValidIp(fpi)) existingFailoverPeerIp.set(node.nodeName, fpi);
     }
   }
 
-  const existingHasync = findChild(root, 'hasync') !== null;
+  const hasyncEl = findChild(root, 'hasync');
+  const existingHasync = hasyncEl !== null;
+  let existingHasyncDetails = null;
+  if (hasyncEl) {
+    existingHasyncDetails = {
+      pfsyncenabled: childText(hasyncEl, 'pfsyncenabled') === 'on',
+      pfsyncinterface: childText(hasyncEl, 'pfsyncinterface'),
+      pfsyncpeerip: childText(hasyncEl, 'pfsyncpeerip'),
+      synchronizetoip: childText(hasyncEl, 'synchronizetoip'),
+      username: childText(hasyncEl, 'username') || 'admin',
+      password: childText(hasyncEl, 'password') || '',
+      sections: HASYNC_SECTIONS.filter(([field]) => childText(hasyncEl, field) === 'on').map(([field]) => field),
+    };
+  }
 
   const ipsecTunnels = findChild(root, 'ipsec') ? findChildren(findChild(root, 'ipsec'), 'phase1').length : 0;
   const openvpnServers = findChild(root, 'openvpn') ? findChildren(findChild(root, 'openvpn'), 'openvpn-server').length : 0;
@@ -572,7 +598,8 @@ function analyzeConfig(doc) {
   return {
     hostname, domain, backend,
     configVersion: childText(root, 'version') || root.getAttribute('version') || 'unknown',
-    interfaces, usedPhysIfs, physIfOwner, existingVips, usedVhids, dhcpEnabledIfaces, dhcpRanges, existingHasync,
+    interfaces, usedPhysIfs, physIfOwner, existingVips, existingVipByInterface, usedVhids,
+    dhcpEnabledIfaces, dhcpRanges, existingFailoverPeerIp, existingHasync, existingHasyncDetails,
     ipsecTunnels, openvpnServers, openvpnClients, certCount,
   };
 }
@@ -580,6 +607,14 @@ function analyzeConfig(doc) {
 function nextVhid(taken) {
   for (let v = 1; v <= 255; v++) if (!taken.has(v)) return v;
   return null;
+}
+
+// If hasync already points at a live interface, that interface is the SYNC link, not a CARP
+// candidate — even though it now has a static IP (isStatic true) once it's actually in use.
+// Every place that filters interfaces by isStatic for CARP purposes must exclude this key too,
+// or it silently shows up as its own bogus CARP card (found by testing, not by inspection).
+function activeSyncKey(a) {
+  return a.existingHasyncDetails && a.existingHasyncDetails.pfsyncinterface;
 }
 
 function nextOptKey(usedKeys) {
@@ -614,10 +649,12 @@ function renderAnalysis(a) {
     html += `<div class="callout warn">${skipped.length} interface(s) have no static IPv4 (DHCP/PPPoE/unset) and can't carry a CARP VIP: ${skipped.map(i => escapeHtml(i.descr)).join(', ')}.</div>`;
   }
   if (a.existingVips.length) {
-    html += `<div class="callout warn">This config already has ${a.existingVips.length} CARP VIP(s) configured (VHIDs: ${a.existingVips.map(v => v.vhid).join(', ')}). New VHIDs below are chosen to avoid colliding with these.</div>`;
+    html += `<div class="callout ok">This primary already has ${a.existingVips.length} CARP VIP(s) configured (VHIDs: ${a.existingVips.map(v => v.vhid).join(', ')}). They're left completely untouched — the matching interface cards below only ask for the secondary's real IP. Any other CARP-eligible interface without an existing VIP still gets the full new-VIP flow, with VHIDs chosen to avoid colliding with these.</div>`;
   }
-  if (a.existingHasync) {
-    html += `<div class="callout warn">An &lt;hasync&gt; block already exists in this config. Generating will overwrite it with the settings below.</div>`;
+  if (a.existingHasyncDetails && a.existingHasyncDetails.pfsyncinterface) {
+    html += `<div class="callout ok">An &lt;hasync&gt; block already exists, already pointed at interface <code>${escapeHtml(a.existingHasyncDetails.pfsyncinterface)}</code> for pfsync. The primary's hasync config is left untouched — the SYNC section below adapts to match it instead of offering to build a new one.</div>`;
+  } else if (a.existingHasync) {
+    html += `<div class="callout warn">An &lt;hasync&gt; block already exists but has no <code>pfsyncinterface</code> set — treating this as not yet fully configured; the SYNC section below builds a fresh one and will overwrite this block.</div>`;
   }
   if (a.backend === 'kea') {
     html += `<div class="callout danger">DHCP backend is <strong>Kea</strong>. Kea's HA (hot-standby with mTLS peering) is a different mechanism from the classic ISC <code>failover_peerip</code> this tool generates, and the config is not compatible between backends. DHCP failover in step 4 will be skipped — configure Kea HA manually per Netgate's guide.</div>`;
@@ -647,13 +684,52 @@ function renderForm(a) {
 
   const takenVhids = new Set(a.usedVhids);
 
-  a.interfaces.filter(i => i.isStatic).forEach(iface => {
+  a.interfaces.filter(i => i.isStatic && i.key !== activeSyncKey(a)).forEach(iface => {
+    const existingVip = a.existingVipByInterface.get(iface.key);
+    const card = document.createElement('div');
+    card.className = 'iface-card';
+
+    const vlanHint = iface.isVlan ? `<p class="hint">VLAN ${escapeHtml(iface.vlanTag)} on trunk ${escapeHtml(iface.vlanParent)}, defined in this config's &lt;vlans&gt; section, which is carried through unchanged to both generated files. This matches automatically on same-model hardware. If the secondary's trunk port differs, edit the &lt;vlans&gt; section by hand after import — this tool doesn't remap it.</p>` : '';
+    const physField = `
+      <div class="field-sm" style="flex:0 0 260px;">
+        <label for="phys_${iface.key}">${iface.isVlan ? 'VLAN interface (fixed)' : 'Secondary physical port'}</label>
+        <input type="text" id="phys_${iface.key}" value="${escapeHtml(iface.physIf)}" ${iface.isVlan ? 'disabled' : ''}>
+      </div>`;
+
+    if (existingVip) {
+      // HA already exists on the primary for this interface — never touch it. Only the
+      // secondary's real IP and physical port need deciding; VIP/VHID/password/advbase are
+      // adopted as-is from what's already live.
+      ifaceRowState[iface.key] = { include: true, existing: true };
+      const suggestedSecIp = a.existingFailoverPeerIp.get(iface.key)
+        || suggestRealIps(iface, a.dhcpRanges.get(iface.key))[0] || '';
+      card.innerHTML = `
+        <div class="iface-title">
+          <input type="checkbox" id="inc_${iface.key}" checked>
+          <label for="inc_${iface.key}" style="margin:0;">${escapeHtml(iface.descr)}</label>
+          <span class="badge">${iface.key}</span>
+          <span class="badge">current: ${escapeHtml(iface.ipaddr)}/${iface.subnetBits}</span>
+          <span class="badge" style="background:var(--ok-bg);color:var(--ok);">Existing HA — adopted as-is</span>
+        </div>
+        <p class="hint">Already has a CARP VIP (${escapeHtml(existingVip.subnet)}, VHID ${existingVip.vhid}, advskew ${existingVip.advskew}) — left completely untouched on the primary. The secondary gets a matching VIP (advskew ${Math.min(254, existingVip.advskew + 100)}) automatically; it just needs its own real IP.</p>
+        <div class="row">
+          <div>
+            <label for="sip_${iface.key}">Secondary's real IP</label>
+            <input type="text" id="sip_${iface.key}" value="${escapeHtml(suggestedSecIp)}">
+          </div>
+          ${physField}
+        </div>
+        ${vlanHint}
+        <div id="err_${iface.key}"></div>
+      `;
+      cardsEl.appendChild(card);
+      return;
+    }
+
     const vhid = nextVhid(takenVhids);
     takenVhids.add(vhid);
     ifaceRowState[iface.key] = { include: true, physOverride: iface.physIf, vhid };
 
-    const card = document.createElement('div');
-    card.className = 'iface-card';
     card.innerHTML = `
       <div class="iface-title">
         <input type="checkbox" id="inc_${iface.key}" checked>
@@ -689,12 +765,9 @@ function renderForm(a) {
         </div>
       </div>
       <div class="row">
-        <div class="field-sm" style="flex:0 0 260px;">
-          <label for="phys_${iface.key}">${iface.isVlan ? 'VLAN interface (fixed)' : 'Secondary physical port'}</label>
-          <input type="text" id="phys_${iface.key}" value="${escapeHtml(iface.physIf)}" ${iface.isVlan ? 'disabled' : ''}>
-        </div>
+        ${physField}
       </div>
-      ${iface.isVlan ? `<p class="hint">VLAN ${escapeHtml(iface.vlanTag)} on trunk ${escapeHtml(iface.vlanParent)}, defined in this config's &lt;vlans&gt; section, which is carried through unchanged to both generated files. This matches automatically on same-model hardware. If the secondary's trunk port differs, edit the &lt;vlans&gt; section by hand after import — this tool doesn't remap it.</p>` : ''}
+      ${vlanHint}
       <div id="err_${iface.key}"></div>
     `;
     cardsEl.appendChild(card);
@@ -702,30 +775,70 @@ function renderForm(a) {
     applyIfaceMode(iface);
   });
 
-  // sync section: source (new interface, or reuse an existing unused one)
-  const spareIfaces = a.interfaces.filter(i => i.isSpare);
-  const syncSourceEl = document.getElementById('syncSource');
-  syncSourceEl.innerHTML = [
-    `<option value="new">Create a new dedicated interface</option>`,
-    ...spareIfaces.map(i => `<option value="${i.key}">Reuse existing: ${escapeHtml(i.descr)} (${i.key}, ${escapeHtml(i.physIf)}) — currently unused</option>`),
-  ].join('');
-  syncSourceEl.addEventListener('change', () => applySyncSource(a));
-  applySyncSource(a);
-
-  // sync section defaults
+  // sync section: source (new interface, reuse an existing unused one, or — if this primary
+  // already has hasync pointed at a live interface — lock onto that one, since it's not
+  // spare/unused at all and there's nothing to "choose" here.
   const maskSelect = document.getElementById('syncMaskBits');
   maskSelect.innerHTML = Array.from({ length: 31 - 24 + 1 }, (_, i) => 31 - i)
-    .map(b => `<option value="${b}"${b === 30 ? ' selected' : ''}>/${b}${b === 31 ? ' (RFC 3021 — no network/broadcast reserved)' : ''}</option>`)
+    .map(b => `<option value="${b}">/${b}${b === 31 ? ' (RFC 3021 — no network/broadcast reserved)' : ''}</option>`)
     .join('');
-  recalcSyncIps();
-  document.getElementById('syncBase').addEventListener('input', recalcSyncIps);
-  maskSelect.addEventListener('change', recalcSyncIps);
+
+  const existingSyncKey = a.existingHasyncDetails && a.existingHasyncDetails.pfsyncinterface;
+  const existingSyncIface = existingSyncKey ? a.interfaces.find(i => i.key === existingSyncKey && !i.isSpare) : null;
+
+  const spareIfaces = a.interfaces.filter(i => i.isSpare);
+  const syncSourceEl = document.getElementById('syncSource');
+
+  if (existingSyncIface) {
+    syncSourceEl.innerHTML = `<option value="${existingSyncIface.key}">Already in use: ${escapeHtml(existingSyncIface.descr)} (${existingSyncIface.key}, ${escapeHtml(existingSyncIface.physIf)})</option>`;
+    syncSourceEl.disabled = true;
+    document.getElementById('syncIfPrimary').value = existingSyncIface.physIf;
+    document.getElementById('syncIfPrimary').disabled = true;
+    document.getElementById('syncIfSecondary').value = existingSyncIface.physIf;
+    document.getElementById('syncSourceHint').textContent = `This primary's pfsync is already pointed at ${existingSyncIface.key} (${existingSyncIface.physIf}, ${existingSyncIface.ipaddr}/${existingSyncIface.subnetBits}) — left untouched. Only the secondary's side needs deciding.`;
+    document.getElementById('syncBase').value = intToIp((ipToInt(existingSyncIface.ipaddr) & (0xFFFFFFFF << (32 - existingSyncIface.subnetBits))) >>> 0);
+    document.getElementById('syncBase').disabled = true;
+    maskSelect.value = String(existingSyncIface.subnetBits);
+    maskSelect.disabled = true;
+    document.getElementById('syncIpPrimary').value = existingSyncIface.ipaddr;
+    document.getElementById('syncIpPrimary').disabled = true;
+    const peerIp = a.existingHasyncDetails.pfsyncpeerip;
+    document.getElementById('syncIpSecondary').value = isValidIp(peerIp) && sameSubnet(peerIp, existingSyncIface.ipaddr, existingSyncIface.subnetBits)
+      ? peerIp
+      : (suggestRealIps(existingSyncIface, null)[0] || '');
+  } else {
+    syncSourceEl.disabled = false;
+    document.getElementById('syncIfPrimary').disabled = false;
+    document.getElementById('syncBase').disabled = false;
+    maskSelect.disabled = false;
+    maskSelect.querySelector('option[value="30"]').selected = true;
+    syncSourceEl.innerHTML = [
+      `<option value="new">Create a new dedicated interface</option>`,
+      ...spareIfaces.map(i => `<option value="${i.key}">Reuse existing: ${escapeHtml(i.descr)} (${i.key}, ${escapeHtml(i.physIf)}) — currently unused</option>`),
+    ].join('');
+    syncSourceEl.addEventListener('change', () => applySyncSource(a));
+    applySyncSource(a);
+    recalcSyncIps();
+    document.getElementById('syncBase').addEventListener('input', recalcSyncIps);
+    maskSelect.addEventListener('change', recalcSyncIps);
+  }
 
   // hasync checkbox grid
   const grid = document.getElementById('syncSections');
+  const onSections = a.existingHasyncDetails ? new Set(a.existingHasyncDetails.sections) : HASYNC_DEFAULT_ON;
   grid.innerHTML = HASYNC_SECTIONS.map(([field, label]) => `
-    <label><input type="checkbox" data-hasync="${field}" ${HASYNC_DEFAULT_ON.has(field) ? 'checked' : ''}> ${label}</label>
+    <label><input type="checkbox" data-hasync="${field}" ${onSections.has(field) ? 'checked' : ''}> ${label}</label>
   `).join('');
+
+  const hasyncHint = document.getElementById('hasyncExistingHint');
+  if (a.existingHasyncDetails) {
+    document.getElementById('hasyncUser').value = a.existingHasyncDetails.username;
+    document.getElementById('hasyncPass').value = a.existingHasyncDetails.password;
+    document.getElementById('hasyncEnabled').checked = true;
+    hasyncHint.textContent = 'Pre-filled from this primary’s existing hasync config — leave as-is unless you know it needs to change (changing it here has no effect on the primary, which already has its own copy).';
+  } else {
+    hasyncHint.textContent = '';
+  }
 
   renderDhcpSection(a);
 }
@@ -858,8 +971,24 @@ document.getElementById('generateBtn').addEventListener('click', () => {
 });
 
 function collectFormState() {
-  const included = analysis.interfaces.filter(i => i.isStatic && document.getElementById('inc_' + i.key).checked);
+  const included = analysis.interfaces.filter(i => i.isStatic && i.key !== activeSyncKey(analysis) && document.getElementById('inc_' + i.key).checked);
   const perIface = included.map(iface => {
+    const existingVip = analysis.existingVipByInterface.get(iface.key);
+    if (existingVip) {
+      // HA already exists here — primary's VIP/VHID/password/advbase are adopted as-is,
+      // never re-derived. Only the secondary's real IP and physical port are asked for.
+      return {
+        iface,
+        existing: true,
+        existingVip,
+        mode: 'existing',
+        primaryIp: iface.ipaddr,
+        secIp: document.getElementById('sip_' + iface.key).value.trim(),
+        vip: existingVip.subnet,
+        vhid: existingVip.vhid,
+        secPhysIf: document.getElementById('phys_' + iface.key).value.trim(),
+      };
+    }
     const mode = document.getElementById('mode_' + iface.key).value; // 'reuse': current IP becomes the VIP; 'new': primary keeps current IP
     const primaryIp = mode === 'reuse' ? document.getElementById('pip_' + iface.key).value.trim() : iface.ipaddr;
     return {
@@ -950,12 +1079,18 @@ function generateConfigs() {
   const s = collectFormState();
   const cidr = linkHosts(s.syncBase, s.syncMaskBits);
   const syncKey = s.syncSource !== 'new' ? s.syncSource : nextOptKey(new Set(analysis.interfaces.map(i => i.key)));
+  // Distinct from "reusing a spare slot": here the primary's sync interface is already fully
+  // live (real IP, subnet, descr) because hasync already points at it — so it must not be
+  // touched at all, not even to re-set fields to the same value they already hold.
+  const existingSyncActive = analysis.existingHasyncDetails
+    && analysis.existingHasyncDetails.pfsyncinterface === s.syncSource
+    && !analysis.interfaces.find(i => i.key === s.syncSource)?.isSpare;
 
   const primaryDoc = new DOMParser().parseFromString(originalXmlText, 'application/xml');
   const secondaryDoc = new DOMParser().parseFromString(originalXmlText, 'application/xml');
 
-  applyCommon(primaryDoc, 'primary', s, cidr, syncKey);
-  applyCommon(secondaryDoc, 'secondary', s, cidr, syncKey);
+  applyCommon(primaryDoc, 'primary', s, cidr, syncKey, existingSyncActive);
+  applyCommon(secondaryDoc, 'secondary', s, cidr, syncKey, existingSyncActive);
 
   reindentXml(primaryDoc);
   reindentXml(secondaryDoc);
@@ -969,7 +1104,7 @@ function generateConfigs() {
   };
 }
 
-function applyCommon(doc, role, s, cidr, syncKey) {
+function applyCommon(doc, role, s, cidr, syncKey, existingSyncActive) {
   const root = doc.documentElement;
   const system = getOrCreateChild(doc, root, 'system');
 
@@ -995,9 +1130,22 @@ function applyCommon(doc, role, s, cidr, syncKey) {
   }
 
   // --- CARP virtual IPs ---
+  // Existing-HA rows already have a live <vip> on the primary — never duplicate it there;
+  // only the secondary needs one, matching the existing password/advbase exactly (required
+  // for CARP negotiation to work) with advskew computed from the *existing* skew, not 0.
   const vipEl = getOrCreateChild(doc, root, 'virtualip');
   for (const row of s.perIface) {
-    const advskew = role === 'primary' ? 0 : Math.min(254, 100);
+    if (row.existing) {
+      // Both docs were cloned from the same original, so the existing <vip> is already
+      // present in *both* — never append a second one. Primary needs no change at all;
+      // secondary just needs its advskew bumped in place, exactly like pfSense's own sync
+      // engine does it (uniqid and everything else stays identical between the two).
+      if (role === 'secondary') {
+        const existingVipEl = findChildren(vipEl, 'vip').find(v => childText(v, 'interface') === row.iface.key);
+        if (existingVipEl) setText(doc, existingVipEl, 'advskew', String(Math.min(254, row.existingVip.advskew + 100)));
+      }
+      continue;
+    }
     const vip = doc.createElement('vip');
     setText(doc, vip, 'mode', 'carp');
     setText(doc, vip, 'interface', row.iface.key);
@@ -1008,44 +1156,55 @@ function applyCommon(doc, role, s, cidr, syncKey) {
     setText(doc, vip, 'password', s.carpPassword);
     setText(doc, vip, 'vhid', String(row.vhid));
     setText(doc, vip, 'advbase', String(s.advbase));
-    setText(doc, vip, 'advskew', String(advskew));
+    setText(doc, vip, 'advskew', String(role === 'primary' ? 0 : Math.min(254, 100)));
     setText(doc, vip, 'uniqid', cryptoRandomId());
     vipEl.appendChild(vip);
   }
 
-  // --- dedicated SYNC interface: either a brand-new slot, or an existing unused one repurposed in place ---
-  const reusing = s.syncSource !== 'new';
-  let syncEl = reusing ? findChild(ifacesEl, syncKey) : null;
-  if (!syncEl) { syncEl = doc.createElement(syncKey); ifacesEl.appendChild(syncEl); }
-  // On reuse, the primary's physical port is already real hardware in the source config — leave it untouched.
-  if (!reusing || role === 'secondary') {
-    setText(doc, syncEl, 'if', role === 'primary' ? s.syncIfPrimary : s.syncIfSecondary);
+  // --- dedicated SYNC interface: a brand-new slot, an existing unused one repurposed in
+  // place, or — if hasync already points at a live interface — left completely untouched
+  // on the primary since it's already fully configured there.
+  if (existingSyncActive && role === 'primary') {
+    // Nothing to do: this interface is already real, live config. Don't even re-write
+    // fields to the same value — untouched means untouched.
+  } else {
+    const reusing = s.syncSource !== 'new';
+    let syncEl = reusing ? findChild(ifacesEl, syncKey) : null;
+    if (!syncEl) { syncEl = doc.createElement(syncKey); ifacesEl.appendChild(syncEl); }
+    // On reuse, the primary's physical port is already real hardware in the source config — leave it untouched.
+    if (!reusing || role === 'secondary') {
+      setText(doc, syncEl, 'if', role === 'primary' ? s.syncIfPrimary : s.syncIfSecondary);
+    }
+    setText(doc, syncEl, 'descr', 'SYNC');
+    if (!findChild(syncEl, 'enable')) syncEl.appendChild(doc.createElement('enable'));
+    setText(doc, syncEl, 'ipaddr', role === 'primary' ? s.syncIpPrimary : s.syncIpSecondary);
+    setText(doc, syncEl, 'subnet', String(cidr.bits));
   }
-  setText(doc, syncEl, 'descr', 'SYNC');
-  if (!findChild(syncEl, 'enable')) syncEl.appendChild(doc.createElement('enable'));
-  setText(doc, syncEl, 'ipaddr', role === 'primary' ? s.syncIpPrimary : s.syncIpSecondary);
-  setText(doc, syncEl, 'subnet', String(cidr.bits));
 
   // --- hasync (pfsync + config sync) ---
-  const hasync = getOrCreateChild(doc, root, 'hasync');
-  // clear any pre-existing sync* flags before re-setting, in case this config already had an <hasync> block
-  for (const [field] of HASYNC_SECTIONS) removeChildTag(hasync, field);
-  removeChildTag(hasync, 'pfsyncenabled');
-  removeChildTag(hasync, 'pfsyncinterface');
-  removeChildTag(hasync, 'pfsyncpeerip');
-  removeChildTag(hasync, 'synchronizetoip');
-  removeChildTag(hasync, 'username');
-  removeChildTag(hasync, 'password');
+  if (existingSyncActive && role === 'primary') {
+    // Already correct and already live — don't touch it, not even to re-write matching values.
+  } else {
+    const hasync = getOrCreateChild(doc, root, 'hasync');
+    // clear any pre-existing sync* flags before re-setting, in case this config already had an <hasync> block
+    for (const [field] of HASYNC_SECTIONS) removeChildTag(hasync, field);
+    removeChildTag(hasync, 'pfsyncenabled');
+    removeChildTag(hasync, 'pfsyncinterface');
+    removeChildTag(hasync, 'pfsyncpeerip');
+    removeChildTag(hasync, 'synchronizetoip');
+    removeChildTag(hasync, 'username');
+    removeChildTag(hasync, 'password');
 
-  if (s.pfsyncEnabled) setText(doc, hasync, 'pfsyncenabled', 'on');
-  setText(doc, hasync, 'pfsyncinterface', syncKey);
-  setText(doc, hasync, 'pfsyncpeerip', role === 'primary' ? s.syncIpSecondary : s.syncIpPrimary);
-  if (s.hasyncEnabled) {
-    // one-directional: only the primary pushes to the secondary
-    if (role === 'primary') setText(doc, hasync, 'synchronizetoip', s.syncIpSecondary);
-    setText(doc, hasync, 'username', s.hasyncUser);
-    setText(doc, hasync, 'password', s.hasyncPass);
-    for (const field of s.hasyncSections) setText(doc, hasync, field, 'on');
+    if (s.pfsyncEnabled) setText(doc, hasync, 'pfsyncenabled', 'on');
+    setText(doc, hasync, 'pfsyncinterface', syncKey);
+    setText(doc, hasync, 'pfsyncpeerip', role === 'primary' ? s.syncIpSecondary : s.syncIpPrimary);
+    if (s.hasyncEnabled) {
+      // one-directional: only the primary pushes to the secondary
+      if (role === 'primary') setText(doc, hasync, 'synchronizetoip', s.syncIpSecondary);
+      setText(doc, hasync, 'username', s.hasyncUser);
+      setText(doc, hasync, 'password', s.hasyncPass);
+      for (const field of s.hasyncSections) setText(doc, hasync, field, 'on');
+    }
   }
 
   // --- DHCP failover ---
