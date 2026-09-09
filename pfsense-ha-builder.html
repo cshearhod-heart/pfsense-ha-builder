@@ -71,6 +71,12 @@
     background: var(--bg); color: var(--text); font: inherit;
   }
   input[type=file] { font: inherit; }
+  .pw-row { display: flex; gap: 6px; }
+  .pw-row input { flex: 1; }
+  .pw-toggle {
+    flex: none; background: var(--bg); color: var(--text-dim); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0 10px; font: inherit; font-size: 12px; cursor: pointer;
+  }
   .row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
   .row > div { flex: 1; min-width: 160px; }
   .field-sm { flex: 0 0 100px; }
@@ -168,8 +174,11 @@
           <input type="number" id="carpAdvbase" value="1" min="1" max="254">
         </div>
         <div>
-          <label for="carpPassword">CARP group password (applies to all VIPs below) — pre-filled with a random value, click the field's reveal icon to check it, or replace it</label>
-          <input type="password" id="carpPassword" placeholder="shared CARP secret">
+          <label for="carpPassword">CARP group password (applies to all VIPs below) — pre-filled with a random value</label>
+          <div class="pw-row">
+            <input type="password" id="carpPassword" placeholder="shared CARP secret">
+            <button type="button" class="pw-toggle" data-pw-toggle="carpPassword">Show</button>
+          </div>
         </div>
       </div>
       <p class="hint">Secondary's advertising skew is not editable — pfSense's own config-sync engine adds 100 to whatever skew you set on the primary (capped at 254) every time it pushes config to the secondary, so the generated files match that behavior from first boot rather than drifting once sync starts.</p>
@@ -227,7 +236,10 @@
       </div>
       <div>
         <label for="hasyncPass">Password</label>
-        <input type="password" id="hasyncPass">
+        <div class="pw-row">
+          <input type="password" id="hasyncPass">
+          <button type="button" class="pw-toggle" data-pw-toggle="hasyncPass">Show</button>
+        </div>
       </div>
     </div>
     <p class="hint">This must be a webConfigurator user with the same username/password on <strong>both</strong> firewalls. This tool records the intended credentials in the config — it does not create the user account.</p>
@@ -1146,6 +1158,17 @@ function downloadXml(xmlText, filename) {
 }
 
 document.getElementById('startOverBtn').addEventListener('click', () => location.reload());
+
+// Plain <input type="password"> gets no native reveal control in Chrome, Firefox, or Safari
+// for a programmatically-set value (no real login form, no autofill match) — so build one.
+for (const btn of document.querySelectorAll('[data-pw-toggle]')) {
+  btn.addEventListener('click', () => {
+    const input = document.getElementById(btn.dataset.pwToggle);
+    const showing = input.type === 'text';
+    input.type = showing ? 'password' : 'text';
+    btn.textContent = showing ? 'Show' : 'Hide';
+  });
+}
 
 /* ---------- misc ---------- */
 
