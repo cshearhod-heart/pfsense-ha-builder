@@ -270,8 +270,8 @@
     <div id="outputSummary"></div>
     <div class="download-row">
       <div class="download-card">
-        <h4>Primary — updated config</h4>
-        <p>Import via Diagnostics &gt; Backup &amp; Restore on the <strong>existing</strong> primary firewall.</p>
+        <h4 id="primaryCardTitle">Primary — updated config</h4>
+        <p id="primaryCardNote">Import via Diagnostics &gt; Backup &amp; Restore on the <strong>existing</strong> primary firewall.</p>
         <button id="dlPrimary">Download primary-updated.xml</button>
       </div>
       <div class="download-card">
@@ -688,7 +688,13 @@ function renderAnalysis(a) {
     html += `<div class="callout warn">An &lt;hasync&gt; block already exists but has no <code>pfsyncinterface</code> set — treating this as not yet fully configured; the SYNC section below builds a fresh one and will overwrite this block.</div>`;
   }
   if (a.backend === 'kea') {
-    html += `<div class="callout danger">DHCP backend is <strong>Kea</strong>. Kea's HA (hot-standby with mTLS peering) is a different mechanism from the classic ISC <code>failover_peerip</code> this tool generates, and the config is not compatible between backends. DHCP failover in step 4 will be skipped — configure Kea HA manually per Netgate's guide.</div>`;
+    if (a.existingKeaHa && (a.existingKeaHa.tls || a.existingKeaHa.mutualtls)) {
+      html += `<div class="callout danger">DHCP backend is <strong>Kea</strong>, with TLS-secured HA already configured. Cert reference IDs won't transfer to a new secondary, so Kea HA generation is skipped — see step 4.</div>`;
+    } else if (a.existingKeaHa) {
+      html += `<div class="callout ok">DHCP backend is <strong>Kea</strong>, with HA already configured (role <code>${escapeHtml(a.existingKeaHa.role)}</code>) — left untouched on the primary, matching secondary generated automatically. See step 4.</div>`;
+    } else {
+      html += `<div class="callout info">DHCP backend is <strong>Kea</strong> — no existing HA found. Step 4 offers to build one on the same dedicated SYNC link.</div>`;
+    }
   }
   const outOfScope = [];
   if (a.ipsecTunnels) outOfScope.push(`${a.ipsecTunnels} IPsec tunnel(s)`);
@@ -1157,11 +1163,34 @@ function generateConfigs() {
   reindentXml(secondaryDoc);
 
   const serializer = new XMLSerializer();
+  const primaryXml = serializer.serializeToString(primaryDoc);
+
+  // Detect when the primary ends up functionally identical to what was uploaded (a fully
+  // adopt-everything scenario, like a config where every CARP-eligible interface, the SYNC
+  // interface, and hasync all already existed) — the revision block always bumps regardless,
+  // so it's excluded from this comparison. Confirmed with a real customer config: this is a
+  // real, common case, not a hypothetical, and it was confusing without being called out.
+  // Re-parses the already-serialized primaryXml rather than doc.cloneNode(true) — cloning a
+  // Document doesn't reliably preserve whatever internal state XMLSerializer uses to decide
+  // whether to emit the XML declaration, which broke this comparison without affecting the
+  // actual output (found by testing against a real config, not by inspection).
+  const stripRevision = doc => {
+    const rev = Array.from(doc.documentElement.childNodes).find(n => n.nodeName === 'revision');
+    if (rev) doc.documentElement.removeChild(rev);
+  };
+  const freshOriginal = new DOMParser().parseFromString(originalXmlText, 'application/xml');
+  reindentXml(freshOriginal);
+  stripRevision(freshOriginal);
+  const primaryForCompare = new DOMParser().parseFromString(primaryXml, 'application/xml');
+  stripRevision(primaryForCompare);
+  const primaryUnchanged = serializer.serializeToString(freshOriginal) === serializer.serializeToString(primaryForCompare);
+
   return {
-    primaryXml: serializer.serializeToString(primaryDoc),
+    primaryXml,
     secondaryXml: serializer.serializeToString(secondaryDoc),
     formState: s,
     syncKey,
+    primaryUnchanged,
   };
 }
 
@@ -1441,6 +1470,14 @@ function renderOutput(result) {
     <p class="hint">Config sync target: ${s.hasyncEnabled ? `primary &rarr; ${escapeHtml(s.syncIpSecondary)} over the SYNC interface` : 'disabled'}.
     DHCP failover: ${s.dhcpFailover.length ? s.dhcpFailover.join(', ') : 'none'}.</p>
   `;
+
+  if (result.primaryUnchanged) {
+    document.getElementById('primaryCardTitle').textContent = 'Primary — no changes needed';
+    document.getElementById('primaryCardNote').innerHTML = 'Everything selected was already configured and adopted as-is — this file is functionally identical to what you uploaded (only the revision timestamp/description differ). <strong>Nothing to re-import here.</strong> Download it only if you want the change note recorded.';
+  } else {
+    document.getElementById('primaryCardTitle').textContent = 'Primary — updated config';
+    document.getElementById('primaryCardNote').innerHTML = 'Import via Diagnostics &gt; Backup &amp; Restore on the <strong>existing</strong> primary firewall.';
+  }
 
   document.getElementById('previewPrimary').textContent = formatXmlPreview(result.primaryXml);
   document.getElementById('previewSecondary').textContent = formatXmlPreview(result.secondaryXml);

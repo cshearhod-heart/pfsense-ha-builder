@@ -12,6 +12,10 @@ Open `pfsense-ha-builder.html` in any browser. Nothing is uploaded — parsing, 
 4. Review the config-sync (XMLRPC) sections and DHCP failover options.
 5. Generate, review the summary and raw XML, download both files.
 
+## When the primary needs no changes at all
+
+If everything selected (every CARP-eligible interface, the SYNC interface, `hasync`, Kea HA) already existed and was adopted as-is, the primary output ends up functionally identical to what you uploaded — only the revision timestamp/description differ. The tool detects this and relabels the download card "Primary — no changes needed" rather than leaving you to wonder whether there's something to import. Found via testing against a real, fully-HA'd customer config, where this is the common case, not an edge case.
+
 ## Primary already has HA configured
 
 If the uploaded config already has a CARP VIP on an interface, or `hasync` already pointed at a live pfsync interface, that interface's card and the SYNC section adapt automatically — nothing already-live is re-derived or touched on the primary:
