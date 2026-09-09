@@ -316,6 +316,30 @@ function removeChildTag(parent, tag) {
   if (el) parent.removeChild(el);
 }
 
+// Newly appended elements (a new CARP vip, a repurposed SYNC interface's ipaddr/subnet, ...)
+// land with no surrounding whitespace, which is valid XML but unreviewable. This rebuilds
+// indentation for container elements — but ONLY where every non-element child is already
+// pure whitespace, so it can never silently drop a stray text/CDATA node it doesn't expect.
+function reindentXml(doc) {
+  function walk(node, depth) {
+    const children = Array.from(node.childNodes);
+    const elementChildren = children.filter(n => n.nodeType === 1);
+    if (elementChildren.length === 0) return; // leaf value (text/CDATA/empty) — never touch
+    const nonElementChildren = children.filter(n => n.nodeType !== 1);
+    const allWhitespace = nonElementChildren.every(n => n.nodeType === 3 && n.textContent.trim() === '');
+    if (!allWhitespace) { for (const c of elementChildren) walk(c, depth + 1); return; }
+    while (node.firstChild) node.removeChild(node.firstChild);
+    const pad = '\n' + '\t'.repeat(depth + 1);
+    for (const child of elementChildren) {
+      node.appendChild(doc.createTextNode(pad));
+      node.appendChild(child);
+      walk(child, depth + 1);
+    }
+    node.appendChild(doc.createTextNode('\n' + '\t'.repeat(depth)));
+  }
+  walk(doc.documentElement, 0);
+}
+
 /* ---------- IPv4 helpers ---------- */
 
 function ipToInt(ip) {
@@ -856,6 +880,9 @@ function generateConfigs() {
 
   applyCommon(primaryDoc, 'primary', s, cidr, syncKey);
   applyCommon(secondaryDoc, 'secondary', s, cidr, syncKey);
+
+  reindentXml(primaryDoc);
+  reindentXml(secondaryDoc);
 
   const serializer = new XMLSerializer();
   return {
