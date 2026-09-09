@@ -40,6 +40,10 @@ Verified against pfSense's own config-sync engine (`rc.filter_synchronize` in th
 
 If an interface's physical port is actually a VLAN pseudo-interface (e.g. `mvneta1.2`), the tool detects it against the config's `<vlans>` section and locks that field instead of letting it be typed like a real NIC name — the value is computed from a parent port + tag defined elsewhere, and editing it without also updating the matching `<vlans>` entry produces a dangling reference. On identical hardware the VLAN carries over correctly with no changes needed, since the whole `<vlans>` section clones unchanged to both generated files.
 
+## SYNC link subnet: /24 through /31
+
+The point-to-point subnet is a base address plus a mask dropdown (not a typed CIDR string — that was more error-prone than it needed to be). `/31` is available and gets RFC 3021 treatment: no network/broadcast address is reserved, so both addresses in the pair are directly usable, which is the whole point for a link that only ever has exactly two hosts. Default stays `/30` for continuity; `/31` is opt-in.
+
 ## SYNC interface: new vs. reuse existing
 
 The SYNC section offers two sources: **create a new dedicated interface** (the default), or **reuse an existing interface already defined in the config but currently unused** (no `<ipaddr>` and not enabled — e.g. a spare `optN` slot freed up by moving something else onto a VLAN). On reuse, the primary's physical port is left untouched since it's already real hardware in the source config; only `descr`, `enable`, `ipaddr`, and `subnet` are set on it, and the secondary gets its own physical port field (defaults to the same port, editable for non-identical hardware).
