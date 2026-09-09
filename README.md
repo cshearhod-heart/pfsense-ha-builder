@@ -21,6 +21,8 @@ CARP only protects whatever address downstream devices actually point at. For ea
 
 When reusing the current IP, the tool also sets `dhcpd/<iface>/gateway` explicitly to the VIP on interfaces with DHCP enabled. Without this, pfSense falls back to handing out its own interface IP as the DHCP-issued default gateway (confirmed in `services.inc`) — which after the swap would be the *new, non-floating* address, quietly breaking failover for every DHCP client on that segment.
 
+In "reuse" mode, the primary's new IP and the secondary's IP are pre-filled with the next two free host addresses in the subnet (e.g. current `.1` → suggests `.2`/`.3`), skipping the interface's own DHCP pool range if one exists so the suggestion can't collide with a live lease. Just a convenience — both fields stay editable.
+
 ## What it generates
 
 - **CARP virtual IPs** (`virtualip/vip`, `mode=carp`) for each selected interface, with VHIDs chosen to avoid colliding with anything already in the source config.

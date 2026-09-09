@@ -368,6 +368,25 @@ function sameSubnet(ipA, ipB, bits) {
   return (a & mask) === (b & mask);
 }
 
+// Suggests the next two free host addresses in an interface's subnet for 'reuse' mode
+// (current IP -> VIP, so both real IPs need to be *new*). Skips the network/broadcast
+// addresses, the current address itself, and — importantly — the interface's own DHCP
+// pool range if one exists, so the suggestion can't collide with a lease pfSense might
+// hand to an actual client.
+function suggestRealIps(iface, dhcpRange) {
+  const mask = iface.subnetBits === 0 ? 0 : (0xFFFFFFFF << (32 - iface.subnetBits)) >>> 0;
+  const netInt = (ipToInt(iface.ipaddr) & mask) >>> 0;
+  const broadcastInt = (netInt | (~mask >>> 0)) >>> 0;
+  const currentInt = ipToInt(iface.ipaddr);
+  const found = [];
+  for (let cand = netInt + 1; cand < broadcastInt && found.length < 2; cand++) {
+    if (cand === currentInt) continue;
+    if (dhcpRange && cand >= dhcpRange.from && cand <= dhcpRange.to) continue;
+    found.push(intToIp(cand));
+  }
+  return found; // may have fewer than 2 entries if the subnet is too small/crowded
+}
+
 /* ---------- App state ---------- */
 
 let originalXmlText = null;
@@ -510,10 +529,17 @@ function analyzeConfig(doc) {
 
   const dhcpdEl = findChild(root, 'dhcpd');
   const dhcpEnabledIfaces = [];
+  const dhcpRanges = new Map(); // key -> {from, to} ints, so address suggestion can avoid the active pool
   if (dhcpdEl) {
     for (const node of dhcpdEl.childNodes) {
       if (node.nodeType !== 1) continue;
       if (findChild(node, 'enable') !== null) dhcpEnabledIfaces.push(node.nodeName);
+      const rangeEl = findChild(node, 'range');
+      if (rangeEl) {
+        const from = ipToInt(childText(rangeEl, 'from'));
+        const to = ipToInt(childText(rangeEl, 'to'));
+        if (from !== null && to !== null) dhcpRanges.set(node.nodeName, { from, to });
+      }
     }
   }
 
@@ -527,7 +553,7 @@ function analyzeConfig(doc) {
   return {
     hostname, domain, backend,
     configVersion: childText(root, 'version') || root.getAttribute('version') || 'unknown',
-    interfaces, usedPhysIfs, physIfOwner, existingVips, usedVhids, dhcpEnabledIfaces, existingHasync,
+    interfaces, usedPhysIfs, physIfOwner, existingVips, usedVhids, dhcpEnabledIfaces, dhcpRanges, existingHasync,
     ipsecTunnels, openvpnServers, openvpnClients, certCount,
   };
 }
@@ -683,12 +709,23 @@ function applyIfaceMode(iface) {
   const mode = document.getElementById('mode_' + iface.key).value;
   const pipWrap = document.getElementById('pipWrap_' + iface.key);
   const pipInput = document.getElementById('pip_' + iface.key);
+  const sipInput = document.getElementById('sip_' + iface.key);
   const vipInput = document.getElementById('vip_' + iface.key);
   if (mode === 'reuse') {
     pipWrap.hidden = false;
     pipInput.disabled = false;
     vipInput.value = iface.ipaddr;
     vipInput.disabled = true;
+    // Pre-fill the two new real IPs with the next free host addresses in the same subnet —
+    // current IP becomes the VIP, so both real IPs need to be new anyway. Only fills empty
+    // fields, so it never overwrites a manual edit made while staying in 'reuse' mode.
+    // (Leaving 'reuse' mode clears the primary-IP field since it's inapplicable there, so
+    // coming back re-suggests fresh rather than resurrecting a stale hidden value.)
+    if (!pipInput.value || !sipInput.value) {
+      const suggested = suggestRealIps(iface, analysis.dhcpRanges.get(iface.key));
+      if (!pipInput.value && suggested[0]) pipInput.value = suggested[0];
+      if (!sipInput.value && suggested[1]) sipInput.value = suggested[1];
+    }
   } else {
     pipWrap.hidden = true;
     pipInput.disabled = true;
