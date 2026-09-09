@@ -1,0 +1,4 @@
+# Real pfSense backups contain admin password hashes, CARP/IPsec/OpenVPN secrets,
+# and full network topology. Never commit a real config.xml to this repo.
+*.xml
+!test-fixtures/*.xml

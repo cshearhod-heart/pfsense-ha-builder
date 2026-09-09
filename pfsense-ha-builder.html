@@ -1,0 +1,931 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pfSense HA / CARP Builder</title>
+<style>
+  :root {
+    --bg: #f4f6f8;
+    --panel: #ffffff;
+    --border: #d8dee5;
+    --text: #1c2530;
+    --text-dim: #5b6b7c;
+    --accent: #1f6feb;
+    --accent-dim: #e8f0fe;
+    --ok: #1a7f4e;
+    --ok-bg: #e6f6ee;
+    --warn: #8a5a00;
+    --warn-bg: #fff6e0;
+    --danger: #b3261e;
+    --danger-bg: #fdecea;
+    --mono: "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14181d;
+      --panel: #1c2229;
+      --border: #333c46;
+      --text: #e6e9ed;
+      --text-dim: #9aa7b4;
+      --accent: #6ea8fe;
+      --accent-dim: #1d2b40;
+      --ok: #4fd08a;
+      --ok-bg: #123425;
+      --warn: #e2b13c;
+      --warn-bg: #3a2f0e;
+      --danger: #f28b82;
+      --danger-bg: #3a1817;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 20px 28px; border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  header h1 { margin: 0 0 4px; font-size: 19px; }
+  header p { margin: 0; color: var(--text-dim); font-size: 13px; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 20px 80px; }
+  section.step {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 20px 24px; margin-bottom: 20px;
+  }
+  section.step[hidden] { display: none; }
+  section.step h2 {
+    font-size: 15px; margin: 0 0 14px; display: flex; align-items: center; gap: 8px;
+  }
+  section.step h2 .num {
+    background: var(--accent); color: #fff; width: 22px; height: 22px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center; font-size: 12px; flex: none;
+  }
+  h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-dim); margin: 22px 0 10px; }
+  h3:first-of-type { margin-top: 0; }
+  p.hint { color: var(--text-dim); font-size: 12.5px; margin: 4px 0 12px; }
+  label { display: block; font-size: 12.5px; color: var(--text-dim); margin-bottom: 3px; }
+  input[type=text], input[type=password], input[type=number], select {
+    width: 100%; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text); font: inherit;
+  }
+  input[type=file] { font: inherit; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
+  .row > div { flex: 1; min-width: 160px; }
+  .field-sm { flex: 0 0 100px; }
+  table.iftable { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 8px; }
+  table.iftable th { text-align: left; font-size: 11.5px; color: var(--text-dim); font-weight: 600;
+    padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  table.iftable td { padding: 6px 8px; vertical-align: top; border-bottom: 1px solid var(--border); }
+  .iface-card {
+    border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 12px;
+  }
+  .iface-card .iface-title { font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .iface-card .iface-title .badge {
+    font-weight: 500; font-size: 11px; color: var(--text-dim); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px;
+  }
+  .skip-note { color: var(--text-dim); font-size: 12.5px; padding: 8px 0; }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .checkbox-row input { width: auto; }
+  .checkbox-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 16px; margin-bottom: 6px; }
+  .checkbox-grid label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); margin: 0; }
+  .checkbox-grid input { width: auto; }
+  details summary { cursor: pointer; color: var(--accent); font-size: 12.5px; margin: 8px 0; }
+  button {
+    background: var(--accent); color: #fff; border: none; border-radius: 7px;
+    padding: 10px 18px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .callout { border-radius: 8px; padding: 10px 14px; font-size: 13px; margin: 10px 0; }
+  .callout.ok { background: var(--ok-bg); color: var(--ok); }
+  .callout.warn { background: var(--warn-bg); color: var(--warn); }
+  .callout.danger { background: var(--danger-bg); color: var(--danger); }
+  .callout.info { background: var(--accent-dim); color: var(--accent); }
+  ul.plain { margin: 6px 0 0; padding-left: 18px; }
+  .download-row { display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
+  .download-card {
+    flex: 1; min-width: 260px; border: 1px solid var(--border); border-radius: 8px; padding: 16px;
+  }
+  .download-card h4 { margin: 0 0 4px; font-size: 14px; }
+  .download-card p { margin: 0 0 12px; color: var(--text-dim); font-size: 12.5px; }
+  pre.xmlpreview {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+    font: 12px/1.5 var(--mono); overflow-x: auto; max-height: 360px; white-space: pre-wrap; word-break: break-all;
+  }
+  .field-error { color: var(--danger); font-size: 12px; margin-top: 3px; }
+  .muted { color: var(--text-dim); }
+  code { font-family: var(--mono); background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>pfSense HA / CARP Builder</h1>
+  <p>Upload a running pfSense's config.xml backup and generate a paired primary/secondary configuration for CARP high availability. Everything runs in this browser tab — the file is never uploaded anywhere.</p>
+</header>
+
+<main>
+
+  <section class="step" id="step-upload">
+    <h2><span class="num">1</span> Upload the primary firewall's backup</h2>
+    <p class="hint">Diagnostics &gt; Backup &amp; Restore &gt; Download configuration as XML, on the firewall that will become the HA primary.</p>
+    <input type="file" id="fileInput" accept=".xml">
+    <div id="uploadError"></div>
+  </section>
+
+  <section class="step" id="step-analysis" hidden>
+    <h2><span class="num">2</span> What we found</h2>
+    <div id="analysisSummary"></div>
+  </section>
+
+  <section class="step" id="step-form" hidden>
+    <h2><span class="num">3</span> Configure the HA pair</h2>
+
+    <h3>Secondary firewall identity</h3>
+    <div class="row">
+      <div>
+        <label for="secHostname">Secondary hostname</label>
+        <input type="text" id="secHostname">
+      </div>
+      <div>
+        <label for="secDomain">Domain</label>
+        <input type="text" id="secDomain">
+      </div>
+    </div>
+
+    <h3>CARP: interfaces, virtual IPs, and real IPs</h3>
+    <p class="hint">One entry per interface with a static IPv4 address. DHCP/PPPoE interfaces are listed but skipped — CARP needs a stable address on both boxes. Uncheck any interface that shouldn't get a CARP VIP.</p>
+    <div id="ifaceCards"></div>
+
+    <details>
+      <summary>Advanced CARP defaults (advertising base, per-VIP password override)</summary>
+      <div class="row">
+        <div class="field-sm">
+          <label for="carpAdvbase">Advertising base (sec)</label>
+          <input type="number" id="carpAdvbase" value="1" min="1" max="254">
+        </div>
+        <div>
+          <label for="carpPassword">CARP group password (applies to all VIPs below)</label>
+          <input type="password" id="carpPassword" placeholder="shared CARP secret">
+        </div>
+      </div>
+      <p class="hint">Secondary's advertising skew is not editable — pfSense's own config-sync engine adds 100 to whatever skew you set on the primary (capped at 254) every time it pushes config to the secondary, so the generated files match that behavior from first boot rather than drifting once sync starts.</p>
+    </details>
+
+    <h3>Dedicated SYNC interface (pfsync + config sync)</h3>
+    <p class="hint">Per Heart's build standard: a dedicated interface on a direct firewall-to-firewall connection, carrying pfsync state sync and the XMLRPC config-sync channel. No default gateway on this interface.</p>
+    <div class="row">
+      <div>
+        <label for="syncIfPrimary">Physical port — primary (e.g. igb3)</label>
+        <input type="text" id="syncIfPrimary" placeholder="igb3">
+      </div>
+      <div>
+        <label for="syncIfSecondary">Physical port — secondary (e.g. igb3)</label>
+        <input type="text" id="syncIfSecondary" placeholder="igb3">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="syncCidr">Point-to-point link subnet (CIDR)</label>
+        <input type="text" id="syncCidr" value="10.255.255.0/30">
+      </div>
+      <div class="field-sm">
+        <label for="syncIpPrimary">Primary IP</label>
+        <input type="text" id="syncIpPrimary">
+      </div>
+      <div class="field-sm">
+        <label for="syncIpSecondary">Secondary IP</label>
+        <input type="text" id="syncIpSecondary">
+      </div>
+    </div>
+    <div id="syncWarning"></div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="pfsyncEnabled" checked>
+      <label for="pfsyncEnabled" style="margin:0;">Enable pfsync (state synchronization)</label>
+    </div>
+
+    <h3>Config synchronization (XMLRPC)</h3>
+    <p class="hint">Configured on the primary only — pfSense recommends one-directional sync, so the secondary's "Synchronize Config to IP" is left blank in the generated file.</p>
+    <div class="checkbox-row">
+      <input type="checkbox" id="hasyncEnabled" checked>
+      <label for="hasyncEnabled" style="margin:0;">Enable configuration synchronization</label>
+    </div>
+    <div class="row">
+      <div>
+        <label for="hasyncUser">Username</label>
+        <input type="text" id="hasyncUser" value="admin">
+      </div>
+      <div>
+        <label for="hasyncPass">Password</label>
+        <input type="password" id="hasyncPass">
+      </div>
+    </div>
+    <p class="hint">This must be a webConfigurator user with the same username/password on <strong>both</strong> firewalls. This tool records the intended credentials in the config — it does not create the user account.</p>
+    <p class="hint">Sections to synchronize:</p>
+    <div class="checkbox-grid" id="syncSections"></div>
+  </section>
+
+  <section class="step" id="step-dhcp" hidden>
+    <h2><span class="num">4</span> DHCP failover</h2>
+    <div id="dhcpSection"></div>
+  </section>
+
+  <section class="step" id="step-generate" hidden>
+    <h2><span class="num">5</span> Generate</h2>
+    <div id="validationErrors"></div>
+    <button id="generateBtn">Generate configs</button>
+  </section>
+
+  <section class="step" id="step-output" hidden>
+    <h2><span class="num">6</span> Review and download</h2>
+    <div id="outputWarnings"></div>
+    <div id="outputSummary"></div>
+    <div class="download-row">
+      <div class="download-card">
+        <h4>Primary — updated config</h4>
+        <p>Import via Diagnostics &gt; Backup &amp; Restore on the <strong>existing</strong> primary firewall.</p>
+        <button id="dlPrimary">Download primary-updated.xml</button>
+      </div>
+      <div class="download-card">
+        <h4>Secondary — new config</h4>
+        <p>Import onto the <strong>second</strong> physical unit before joining it to the network, so it never comes up with the primary's live IPs.</p>
+        <button id="dlSecondary">Download secondary-new.xml</button>
+      </div>
+    </div>
+    <details>
+      <summary>View raw XML (both files)</summary>
+      <h3>Primary</h3>
+      <pre class="xmlpreview" id="previewPrimary"></pre>
+      <h3>Secondary</h3>
+      <pre class="xmlpreview" id="previewSecondary"></pre>
+    </details>
+    <button class="secondary" id="startOverBtn" style="margin-top:16px;">Start over</button>
+  </section>
+
+</main>
+
+<script>
+'use strict';
+
+/* ---------- XML helpers (avoid relying on CSS-selector support in XML docs) ---------- */
+
+function findChild(parent, tag) {
+  if (!parent) return null;
+  for (const n of parent.childNodes) if (n.nodeType === 1 && n.nodeName === tag) return n;
+  return null;
+}
+function findChildren(parent, tag) {
+  if (!parent) return [];
+  const out = [];
+  for (const n of parent.childNodes) if (n.nodeType === 1 && n.nodeName === tag) out.push(n);
+  return out;
+}
+function childText(parent, tag) {
+  const el = findChild(parent, tag);
+  return el ? el.textContent.trim() : null;
+}
+function getOrCreateChild(doc, parent, tag) {
+  let el = findChild(parent, tag);
+  if (!el) { el = doc.createElement(tag); parent.appendChild(el); }
+  return el;
+}
+function setText(doc, parent, tag, value) {
+  const el = getOrCreateChild(doc, parent, tag);
+  el.textContent = value;
+  return el;
+}
+function setPresenceFlag(doc, parent, tag, present) {
+  // pfSense convention: an empty self-closing tag means "true"; absence means "false"
+  const existing = findChild(parent, tag);
+  if (present && !existing) { doc.createElement(tag); parent.appendChild(doc.createElement(tag)); }
+  else if (present && existing) { existing.textContent = ''; }
+  else if (!present && existing) { parent.removeChild(existing); }
+}
+function removeChildTag(parent, tag) {
+  const el = findChild(parent, tag);
+  if (el) parent.removeChild(el);
+}
+
+/* ---------- IPv4 helpers ---------- */
+
+function ipToInt(ip) {
+  const p = ip.split('.').map(Number);
+  if (p.length !== 4 || p.some(n => isNaN(n) || n < 0 || n > 255)) return null;
+  return ((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]) >>> 0;
+}
+function intToIp(n) {
+  return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
+}
+function isValidIp(ip) { return typeof ip === 'string' && ipToInt(ip) !== null; }
+function parseCidr(cidr) {
+  const m = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/(\d{1,2})$/.exec((cidr || '').trim());
+  if (!m) return null;
+  const base = ipToInt(m[1]);
+  const bits = parseInt(m[2], 10);
+  if (base === null || bits < 8 || bits > 30) return null;
+  const mask = bits === 0 ? 0 : (0xFFFFFFFF << (32 - bits)) >>> 0;
+  const network = (base & mask) >>> 0;
+  return { network, bits, mask };
+}
+function sameSubnet(ipA, ipB, bits) {
+  const a = ipToInt(ipA), b = ipToInt(ipB);
+  if (a === null || b === null) return false;
+  const mask = bits === 0 ? 0 : (0xFFFFFFFF << (32 - bits)) >>> 0;
+  return (a & mask) === (b & mask);
+}
+
+/* ---------- App state ---------- */
+
+let originalXmlText = null;
+let analysis = null;
+let ifaceRowState = {}; // key -> {include, secIp, vip, vhid, physOverride}
+const HASYNC_SECTIONS = [
+  ['synchronizerules', 'Firewall rules'],
+  ['synchronizenat', 'NAT'],
+  ['synchronizealiases', 'Aliases'],
+  ['synchronizeschedules', 'Firewall schedules'],
+  ['synchronizevirtualip', 'Virtual IPs (CARP)'],
+  ['synchronizestaticroutes', 'Static routes'],
+  ['synchronizednsforwarder', 'DNS forwarder/resolver'],
+  ['synchronizeusers', 'Users'],
+  ['synchronizeauthservers', 'Auth servers'],
+  ['synchronizecerts', 'Certificates'],
+  ['synchronizedhcpd', 'DHCP server'],
+  ['synchronizedhcrelay', 'DHCP relay'],
+  ['synchronizewol', 'Wake on LAN'],
+  ['synchronizeipsec', 'IPsec'],
+  ['synchronizeopenvpn', 'OpenVPN'],
+  ['synchronizetrafficshaper', 'Traffic shaper'],
+  ['synchronizetrafficshaperlimiter', 'Traffic shaper limiters'],
+  ['synchronizecaptiveportal', 'Captive portal'],
+];
+const HASYNC_DEFAULT_ON = new Set([
+  'synchronizerules', 'synchronizenat', 'synchronizealiases', 'synchronizeschedules',
+  'synchronizevirtualip', 'synchronizestaticroutes', 'synchronizednsforwarder',
+  'synchronizeusers', 'synchronizeauthservers', 'synchronizecerts', 'synchronizedhcpd',
+]);
+
+/* ---------- Step 1: upload + parse ---------- */
+
+document.getElementById('fileInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  const errEl = document.getElementById('uploadError');
+  errEl.innerHTML = '';
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const doc = new DOMParser().parseFromString(text, 'application/xml');
+    const perr = doc.querySelector('parsererror');
+    if (perr || doc.documentElement.nodeName !== 'pfsense') {
+      throw new Error('This does not look like a pfSense config.xml (no <pfsense> root element found).');
+    }
+    originalXmlText = text;
+    analysis = analyzeConfig(doc);
+    renderAnalysis(analysis);
+    renderForm(analysis);
+    document.getElementById('step-analysis').hidden = false;
+    document.getElementById('step-form').hidden = false;
+    document.getElementById('step-dhcp').hidden = false;
+    document.getElementById('step-generate').hidden = false;
+    document.getElementById('step-output').hidden = true;
+  } catch (err) {
+    errEl.innerHTML = `<div class="callout danger">${escapeHtml(err.message)}</div>`;
+    analysis = null;
+    document.getElementById('step-analysis').hidden = true;
+    document.getElementById('step-form').hidden = true;
+    document.getElementById('step-dhcp').hidden = true;
+    document.getElementById('step-generate').hidden = true;
+  }
+});
+
+function analyzeConfig(doc) {
+  const root = doc.documentElement;
+  const system = findChild(root, 'system');
+  const hostname = childText(system, 'hostname') || 'pfsense';
+  const domain = childText(system, 'domain') || 'localdomain';
+  const dhcpBackend = childText(system, 'dhcpbackend') || 'isc'; // config.xml stores this under <system> in some builds and top-level in others
+  const dhcpBackendTop = childText(root, 'dhcpbackend');
+  const backend = dhcpBackendTop || dhcpBackend || 'isc';
+
+  const ifacesEl = findChild(root, 'interfaces');
+  const interfaces = [];
+  if (ifacesEl) {
+    for (const node of ifacesEl.childNodes) {
+      if (node.nodeType !== 1) continue;
+      const key = node.nodeName;
+      const ipaddr = childText(node, 'ipaddr');
+      const isStatic = isValidIp(ipaddr);
+      interfaces.push({
+        key,
+        physIf: childText(node, 'if') || '',
+        descr: childText(node, 'descr') || key.toUpperCase(),
+        ipaddr: ipaddr,
+        subnetBits: node && childText(node, 'subnet') ? parseInt(childText(node, 'subnet'), 10) : null,
+        enabled: findChild(node, 'enable') !== null,
+        isStatic,
+      });
+    }
+  }
+
+  const usedPhysIfs = new Set(interfaces.map(i => i.physIf).filter(Boolean));
+
+  const vipEl = findChild(root, 'virtualip');
+  const existingVips = [];
+  const usedVhids = new Set();
+  if (vipEl) {
+    for (const vip of findChildren(vipEl, 'vip')) {
+      const mode = childText(vip, 'mode');
+      const vhid = childText(vip, 'vhid');
+      if (vhid) usedVhids.add(parseInt(vhid, 10));
+      if (mode === 'carp') {
+        existingVips.push({
+          interface: childText(vip, 'interface'),
+          subnet: childText(vip, 'subnet'),
+          vhid,
+          advskew: childText(vip, 'advskew'),
+        });
+      }
+    }
+  }
+
+  const dhcpdEl = findChild(root, 'dhcpd');
+  const dhcpEnabledIfaces = [];
+  if (dhcpdEl) {
+    for (const node of dhcpdEl.childNodes) {
+      if (node.nodeType !== 1) continue;
+      if (findChild(node, 'enable') !== null) dhcpEnabledIfaces.push(node.nodeName);
+    }
+  }
+
+  const existingHasync = findChild(root, 'hasync') !== null;
+
+  const ipsecTunnels = findChild(root, 'ipsec') ? findChildren(findChild(root, 'ipsec'), 'phase1').length : 0;
+  const openvpnServers = findChild(root, 'openvpn') ? findChildren(findChild(root, 'openvpn'), 'openvpn-server').length : 0;
+  const openvpnClients = findChild(root, 'openvpn') ? findChildren(findChild(root, 'openvpn'), 'openvpn-client').length : 0;
+  const certCount = findChild(root, 'cert') ? findChildren(root, 'cert').length : 0;
+
+  return {
+    hostname, domain, backend,
+    configVersion: childText(root, 'version') || root.getAttribute('version') || 'unknown',
+    interfaces, usedPhysIfs, existingVips, usedVhids, dhcpEnabledIfaces, existingHasync,
+    ipsecTunnels, openvpnServers, openvpnClients, certCount,
+  };
+}
+
+function nextVhid(taken) {
+  for (let v = 1; v <= 255; v++) if (!taken.has(v)) return v;
+  return null;
+}
+
+function nextOptKey(usedKeys) {
+  let n = 1;
+  while (usedKeys.has('opt' + n)) n++;
+  return 'opt' + n;
+}
+
+/* ---------- Step 2: analysis summary ---------- */
+
+function renderAnalysis(a) {
+  const staticCount = a.interfaces.filter(i => i.isStatic).length;
+  const skipped = a.interfaces.filter(i => !i.isStatic);
+  let html = `
+    <div class="callout info">
+      Hostname <code>${escapeHtml(a.hostname)}.${escapeHtml(a.domain)}</code> &middot;
+      config format <code>${escapeHtml(a.configVersion)}</code> &middot;
+      DHCP backend <code>${escapeHtml(a.backend)}</code>
+    </div>
+    <table class="iftable">
+      <tr><th>Interface</th><th>Physical port</th><th>Address</th><th>DHCP failover</th></tr>
+      ${a.interfaces.map(i => `
+        <tr>
+          <td>${escapeHtml(i.descr)} <span class="muted">(${i.key})</span></td>
+          <td>${escapeHtml(i.physIf)}</td>
+          <td>${i.isStatic ? escapeHtml(i.ipaddr) + '/' + i.subnetBits : `<span class="muted">${escapeHtml(i.ipaddr || 'unset')}</span>`}</td>
+          <td>${a.dhcpEnabledIfaces.includes(i.key) ? 'enabled' : ''}</td>
+        </tr>`).join('')}
+    </table>`;
+
+  if (skipped.length) {
+    html += `<div class="callout warn">${skipped.length} interface(s) have no static IPv4 (DHCP/PPPoE/unset) and can't carry a CARP VIP: ${skipped.map(i => escapeHtml(i.descr)).join(', ')}.</div>`;
+  }
+  if (a.existingVips.length) {
+    html += `<div class="callout warn">This config already has ${a.existingVips.length} CARP VIP(s) configured (VHIDs: ${a.existingVips.map(v => v.vhid).join(', ')}). New VHIDs below are chosen to avoid colliding with these.</div>`;
+  }
+  if (a.existingHasync) {
+    html += `<div class="callout warn">An &lt;hasync&gt; block already exists in this config. Generating will overwrite it with the settings below.</div>`;
+  }
+  if (a.backend === 'kea') {
+    html += `<div class="callout danger">DHCP backend is <strong>Kea</strong>. Kea's HA (hot-standby with mTLS peering) is a different mechanism from the classic ISC <code>failover_peerip</code> this tool generates, and the config is not compatible between backends. DHCP failover in step 4 will be skipped — configure Kea HA manually per Netgate's guide.</div>`;
+  }
+  const outOfScope = [];
+  if (a.ipsecTunnels) outOfScope.push(`${a.ipsecTunnels} IPsec tunnel(s)`);
+  if (a.openvpnServers) outOfScope.push(`${a.openvpnServers} OpenVPN server(s)`);
+  if (a.openvpnClients) outOfScope.push(`${a.openvpnClients} OpenVPN client(s)`);
+  if (a.certCount) outOfScope.push(`${a.certCount} certificate(s)`);
+  if (outOfScope.length) {
+    html += `<div class="callout info">Found ${outOfScope.join(', ')} in this config. This tool copies them through unchanged onto the secondary — review whether any of them need endpoint-specific changes for a second physical unit (this is not done automatically).</div>`;
+  }
+
+  document.getElementById('analysisSummary').innerHTML = html;
+}
+
+/* ---------- Step 3: form ---------- */
+
+function renderForm(a) {
+  document.getElementById('secHostname').value = a.hostname + '-b';
+  document.getElementById('secDomain').value = a.domain;
+
+  ifaceRowState = {};
+  const cardsEl = document.getElementById('ifaceCards');
+  cardsEl.innerHTML = '';
+
+  const takenVhids = new Set(a.usedVhids);
+
+  a.interfaces.filter(i => i.isStatic).forEach(iface => {
+    const vhid = nextVhid(takenVhids);
+    takenVhids.add(vhid);
+    ifaceRowState[iface.key] = { include: true, physOverride: iface.physIf, vhid };
+
+    const card = document.createElement('div');
+    card.className = 'iface-card';
+    card.innerHTML = `
+      <div class="iface-title">
+        <input type="checkbox" id="inc_${iface.key}" checked>
+        <label for="inc_${iface.key}" style="margin:0;">${escapeHtml(iface.descr)}</label>
+        <span class="badge">${iface.key}</span>
+        <span class="badge">${escapeHtml(iface.ipaddr)}/${iface.subnetBits}</span>
+      </div>
+      <div class="row">
+        <div>
+          <label>Primary IP (unchanged)</label>
+          <input type="text" value="${escapeHtml(iface.ipaddr)}" disabled>
+        </div>
+        <div>
+          <label for="sip_${iface.key}">Secondary IP</label>
+          <input type="text" id="sip_${iface.key}">
+        </div>
+        <div>
+          <label for="vip_${iface.key}">CARP shared VIP</label>
+          <input type="text" id="vip_${iface.key}">
+        </div>
+        <div class="field-sm">
+          <label for="vhid_${iface.key}">VHID</label>
+          <input type="number" id="vhid_${iface.key}" min="1" max="255" value="${vhid}">
+        </div>
+      </div>
+      <div class="row">
+        <div class="field-sm" style="flex:0 0 260px;">
+          <label for="phys_${iface.key}">Secondary physical port</label>
+          <input type="text" id="phys_${iface.key}" value="${escapeHtml(iface.physIf)}">
+        </div>
+      </div>
+      <div id="err_${iface.key}"></div>
+    `;
+    cardsEl.appendChild(card);
+  });
+
+  // sync section defaults
+  recalcSyncIps();
+  document.getElementById('syncCidr').addEventListener('input', recalcSyncIps);
+
+  // hasync checkbox grid
+  const grid = document.getElementById('syncSections');
+  grid.innerHTML = HASYNC_SECTIONS.map(([field, label]) => `
+    <label><input type="checkbox" data-hasync="${field}" ${HASYNC_DEFAULT_ON.has(field) ? 'checked' : ''}> ${label}</label>
+  `).join('');
+
+  renderDhcpSection(a);
+}
+
+function recalcSyncIps() {
+  const cidr = parseCidr(document.getElementById('syncCidr').value);
+  const warnEl = document.getElementById('syncWarning');
+  if (!cidr) {
+    warnEl.innerHTML = `<div class="callout danger">Enter a valid CIDR, e.g. 10.255.255.0/30.</div>`;
+    return;
+  }
+  document.getElementById('syncIpPrimary').value = intToIp(cidr.network + 1);
+  document.getElementById('syncIpSecondary').value = intToIp(cidr.network + 2);
+
+  let warn = '';
+  if (analysis) {
+    for (const iface of analysis.interfaces.filter(i => i.isStatic)) {
+      if (sameSubnet(intToIp(cidr.network), iface.ipaddr, Math.min(cidr.bits, iface.subnetBits))) {
+        warn = `<div class="callout warn">The sync subnet overlaps with ${escapeHtml(iface.descr)}'s subnet (${iface.ipaddr}/${iface.subnetBits}). Pick a subnet that isn't already in use anywhere on this network.</div>`;
+      }
+    }
+  }
+  warnEl.innerHTML = warn;
+}
+
+function renderDhcpSection(a) {
+  const el = document.getElementById('dhcpSection');
+  if (a.backend === 'kea') {
+    el.innerHTML = `<div class="callout danger">
+      DHCP backend is Kea — this tool does not generate Kea HA config in v1. Configure Kea's hot-standby HA
+      manually (System &gt; ... &gt; Kea DHCP HA, or see
+      <a href="https://docs.netgate.com/pfsense/en/latest/recipes/high-availability-kea-convert.html" target="_blank" rel="noopener">docs.netgate.com</a>).
+      Everything else generated below (CARP, sync interface, config sync) is unaffected.
+    </div>`;
+    return;
+  }
+  const dhcpIfaces = a.interfaces.filter(i => a.dhcpEnabledIfaces.includes(i.key) && i.isStatic);
+  if (!dhcpIfaces.length) {
+    el.innerHTML = `<p class="muted">No DHCP-enabled interfaces with a static IP were found in this config — nothing to configure here.</p>`;
+    return;
+  }
+  el.innerHTML = dhcpIfaces.map(iface => `
+    <div class="checkbox-row">
+      <input type="checkbox" id="dhcpfo_${iface.key}" checked>
+      <label for="dhcpfo_${iface.key}" style="margin:0;">
+        Enable DHCP failover on ${escapeHtml(iface.descr)} (${iface.key}) —
+        each side's <code>failover_peerip</code> is set to the other's real interface IP.
+      </label>
+    </div>
+  `).join('');
+}
+
+/* ---------- Step 5: validation + generation ---------- */
+
+document.getElementById('generateBtn').addEventListener('click', () => {
+  const errs = validateForm();
+  const errEl = document.getElementById('validationErrors');
+  if (errs.length) {
+    errEl.innerHTML = `<div class="callout danger"><strong>Fix the following before generating:</strong><ul class="plain">${errs.map(e => `<li>${escapeHtml(e)}</li>`).join('')}</ul></div>`;
+    return;
+  }
+  errEl.innerHTML = '';
+  const result = generateConfigs();
+  renderOutput(result);
+  document.getElementById('step-output').hidden = false;
+  document.getElementById('step-output').scrollIntoView({ behavior: 'smooth' });
+});
+
+function collectFormState() {
+  const included = analysis.interfaces.filter(i => i.isStatic && document.getElementById('inc_' + i.key).checked);
+  const perIface = included.map(iface => ({
+    iface,
+    secIp: document.getElementById('sip_' + iface.key).value.trim(),
+    vip: document.getElementById('vip_' + iface.key).value.trim(),
+    vhid: parseInt(document.getElementById('vhid_' + iface.key).value, 10),
+    secPhysIf: document.getElementById('phys_' + iface.key).value.trim(),
+  }));
+  return {
+    secHostname: document.getElementById('secHostname').value.trim(),
+    secDomain: document.getElementById('secDomain').value.trim(),
+    advbase: parseInt(document.getElementById('carpAdvbase').value, 10) || 1,
+    carpPassword: document.getElementById('carpPassword').value,
+    perIface,
+    syncIfPrimary: document.getElementById('syncIfPrimary').value.trim(),
+    syncIfSecondary: document.getElementById('syncIfSecondary').value.trim(),
+    syncCidr: document.getElementById('syncCidr').value.trim(),
+    syncIpPrimary: document.getElementById('syncIpPrimary').value.trim(),
+    syncIpSecondary: document.getElementById('syncIpSecondary').value.trim(),
+    pfsyncEnabled: document.getElementById('pfsyncEnabled').checked,
+    hasyncEnabled: document.getElementById('hasyncEnabled').checked,
+    hasyncUser: document.getElementById('hasyncUser').value.trim(),
+    hasyncPass: document.getElementById('hasyncPass').value,
+    hasyncSections: Array.from(document.querySelectorAll('#syncSections input[data-hasync]'))
+      .filter(cb => cb.checked).map(cb => cb.dataset.hasync),
+    dhcpFailover: analysis.backend === 'isc'
+      ? analysis.interfaces.filter(i => analysis.dhcpEnabledIfaces.includes(i.key) && i.isStatic
+          && document.getElementById('dhcpfo_' + i.key) && document.getElementById('dhcpfo_' + i.key).checked)
+          .map(i => i.key)
+      : [],
+  };
+}
+
+function validateForm() {
+  const s = collectFormState();
+  const errs = [];
+  if (!s.secHostname) errs.push('Secondary hostname is required.');
+  if (s.secHostname === analysis.hostname) errs.push('Secondary hostname must differ from the primary.');
+  if (!s.perIface.length) errs.push('At least one interface must be included for HA.');
+  if (!s.carpPassword) errs.push('CARP group password is required.');
+
+  const seenVhids = new Set();
+  for (const row of s.perIface) {
+    const label = row.iface.descr;
+    if (!isValidIp(row.secIp)) errs.push(`${label}: secondary IP is missing or invalid.`);
+    if (!isValidIp(row.vip)) errs.push(`${label}: CARP VIP is missing or invalid.`);
+    if (isValidIp(row.secIp) && row.secIp === row.iface.ipaddr) errs.push(`${label}: secondary IP must differ from the primary's IP.`);
+    if (isValidIp(row.vip) && (row.vip === row.iface.ipaddr || row.vip === row.secIp)) errs.push(`${label}: CARP VIP must differ from both real IPs.`);
+    if (isValidIp(row.secIp) && !sameSubnet(row.secIp, row.iface.ipaddr, row.iface.subnetBits)) errs.push(`${label}: secondary IP is not in the same /${row.iface.subnetBits} as the primary.`);
+    if (isValidIp(row.vip) && !sameSubnet(row.vip, row.iface.ipaddr, row.iface.subnetBits)) errs.push(`${label}: CARP VIP is not in the same /${row.iface.subnetBits} as the primary.`);
+    if (!(row.vhid >= 1 && row.vhid <= 255)) errs.push(`${label}: VHID must be between 1 and 255.`);
+    if (seenVhids.has(row.vhid)) errs.push(`${label}: VHID ${row.vhid} is used more than once in this session.`);
+    seenVhids.add(row.vhid);
+    if (!row.secPhysIf) errs.push(`${label}: secondary physical port is required.`);
+  }
+
+  if (!s.syncIfPrimary) errs.push('SYNC interface: primary physical port is required.');
+  if (!s.syncIfSecondary) errs.push('SYNC interface: secondary physical port is required.');
+  const cidr = parseCidr(s.syncCidr);
+  if (!cidr) errs.push('SYNC interface: point-to-point subnet is not a valid CIDR.');
+  if (!isValidIp(s.syncIpPrimary) || !isValidIp(s.syncIpSecondary)) errs.push('SYNC interface: primary/secondary IPs are invalid.');
+  if (analysis.usedPhysIfs.has(s.syncIfPrimary)) errs.push(`SYNC interface: physical port ${s.syncIfPrimary} is already used by another interface in this config.`);
+
+  if (s.hasyncEnabled) {
+    if (!s.hasyncUser) errs.push('HA Sync username is required.');
+    if (!s.hasyncPass) errs.push('HA Sync password is required.');
+  }
+
+  return errs;
+}
+
+function generateConfigs() {
+  const s = collectFormState();
+  const cidr = parseCidr(s.syncCidr);
+  const syncKey = nextOptKey(new Set(analysis.interfaces.map(i => i.key)));
+
+  const primaryDoc = new DOMParser().parseFromString(originalXmlText, 'application/xml');
+  const secondaryDoc = new DOMParser().parseFromString(originalXmlText, 'application/xml');
+
+  applyCommon(primaryDoc, 'primary', s, cidr, syncKey);
+  applyCommon(secondaryDoc, 'secondary', s, cidr, syncKey);
+
+  const serializer = new XMLSerializer();
+  return {
+    primaryXml: serializer.serializeToString(primaryDoc),
+    secondaryXml: serializer.serializeToString(secondaryDoc),
+    formState: s,
+    syncKey,
+  };
+}
+
+function applyCommon(doc, role, s, cidr, syncKey) {
+  const root = doc.documentElement;
+  const system = getOrCreateChild(doc, root, 'system');
+
+  if (role === 'secondary') {
+    setText(doc, system, 'hostname', s.secHostname);
+    setText(doc, system, 'domain', s.secDomain);
+  }
+
+  // --- per-interface real IPs (secondary only) + physical port overrides ---
+  const ifacesEl = getOrCreateChild(doc, root, 'interfaces');
+  for (const row of s.perIface) {
+    const ifEl = findChild(ifacesEl, row.iface.key);
+    if (!ifEl) continue;
+    if (role === 'secondary') {
+      setText(doc, ifEl, 'ipaddr', row.secIp);
+      setText(doc, ifEl, 'if', row.secPhysIf);
+    }
+  }
+
+  // --- CARP virtual IPs ---
+  const vipEl = getOrCreateChild(doc, root, 'virtualip');
+  for (const row of s.perIface) {
+    const advskew = role === 'primary' ? 0 : Math.min(254, 100);
+    const vip = doc.createElement('vip');
+    setText(doc, vip, 'mode', 'carp');
+    setText(doc, vip, 'interface', row.iface.key);
+    setText(doc, vip, 'type', 'single');
+    setText(doc, vip, 'subnet', row.vip);
+    setText(doc, vip, 'subnet_bits', String(row.iface.subnetBits));
+    setText(doc, vip, 'descr', `CARP - ${row.iface.descr}`);
+    setText(doc, vip, 'password', s.carpPassword);
+    setText(doc, vip, 'vhid', String(row.vhid));
+    setText(doc, vip, 'advbase', String(s.advbase));
+    setText(doc, vip, 'advskew', String(advskew));
+    setText(doc, vip, 'uniqid', cryptoRandomId());
+    vipEl.appendChild(vip);
+  }
+
+  // --- dedicated SYNC interface ---
+  const syncEl = doc.createElement(syncKey);
+  setText(doc, syncEl, 'if', role === 'primary' ? s.syncIfPrimary : s.syncIfSecondary);
+  setText(doc, syncEl, 'descr', 'SYNC');
+  syncEl.appendChild(doc.createElement('enable'));
+  setText(doc, syncEl, 'ipaddr', role === 'primary' ? s.syncIpPrimary : s.syncIpSecondary);
+  setText(doc, syncEl, 'subnet', String(cidr.bits));
+  ifacesEl.appendChild(syncEl);
+
+  // --- hasync (pfsync + config sync) ---
+  const hasync = getOrCreateChild(doc, root, 'hasync');
+  // clear any pre-existing sync* flags before re-setting, in case this config already had an <hasync> block
+  for (const [field] of HASYNC_SECTIONS) removeChildTag(hasync, field);
+  removeChildTag(hasync, 'pfsyncenabled');
+  removeChildTag(hasync, 'pfsyncinterface');
+  removeChildTag(hasync, 'pfsyncpeerip');
+  removeChildTag(hasync, 'synchronizetoip');
+  removeChildTag(hasync, 'username');
+  removeChildTag(hasync, 'password');
+
+  if (s.pfsyncEnabled) setText(doc, hasync, 'pfsyncenabled', 'on');
+  setText(doc, hasync, 'pfsyncinterface', syncKey);
+  setText(doc, hasync, 'pfsyncpeerip', role === 'primary' ? s.syncIpSecondary : s.syncIpPrimary);
+  if (s.hasyncEnabled) {
+    // one-directional: only the primary pushes to the secondary
+    if (role === 'primary') setText(doc, hasync, 'synchronizetoip', s.syncIpSecondary);
+    setText(doc, hasync, 'username', s.hasyncUser);
+    setText(doc, hasync, 'password', s.hasyncPass);
+    for (const field of s.hasyncSections) setText(doc, hasync, field, 'on');
+  }
+
+  // --- DHCP failover ---
+  if (s.dhcpFailover.length) {
+    const dhcpd = getOrCreateChild(doc, root, 'dhcpd');
+    for (const key of s.dhcpFailover) {
+      const dhcpIfEl = findChild(dhcpd, key);
+      if (!dhcpIfEl) continue;
+      const row = s.perIface.find(r => r.iface.key === key);
+      const peerIp = role === 'primary' ? row.secIp : row.iface.ipaddr;
+      setText(doc, dhcpIfEl, 'failover_peerip', peerIp);
+    }
+  }
+
+  // --- revision bump ---
+  const revision = getOrCreateChild(doc, root, 'revision');
+  setText(doc, revision, 'time', String(Math.floor(Date.now() / 1000)));
+  setText(doc, revision, 'description', `HA/CARP config generated by pfsense-ha-builder (${role})`);
+}
+
+function cryptoRandomId() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(8))).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/* ---------- Step 6: output ---------- */
+
+let lastResult = null;
+
+function renderOutput(result) {
+  lastResult = result;
+  const s = result.formState;
+
+  let warnings = '';
+  if (analysis.backend === 'kea') {
+    warnings += `<div class="callout danger">Kea DHCP HA was not configured — see step 4.</div>`;
+  }
+  const outOfScope = [];
+  if (analysis.ipsecTunnels) outOfScope.push('IPsec');
+  if (analysis.openvpnServers || analysis.openvpnClients) outOfScope.push('OpenVPN');
+  if (analysis.certCount) outOfScope.push('certificates');
+  if (outOfScope.length) {
+    warnings += `<div class="callout info">${outOfScope.join(', ')} were carried through unchanged — review whether anything there is endpoint-specific before going live.</div>`;
+  }
+  warnings += `<div class="callout warn">
+    <strong>Test on lab hardware first.</strong> Import the secondary file onto a factory-reset or otherwise
+    non-production unit — never onto a box already serving live traffic. Review the primary's diff before
+    importing it back onto the live primary.
+  </div>`;
+  document.getElementById('outputWarnings').innerHTML = warnings;
+
+  document.getElementById('outputSummary').innerHTML = `
+    <table class="iftable">
+      <tr><th>Interface</th><th>Primary IP</th><th>Secondary IP</th><th>CARP VIP</th><th>VHID</th></tr>
+      ${s.perIface.map(r => `
+        <tr>
+          <td>${escapeHtml(r.iface.descr)}</td>
+          <td>${escapeHtml(r.iface.ipaddr)}</td>
+          <td>${escapeHtml(r.secIp)}</td>
+          <td>${escapeHtml(r.vip)}</td>
+          <td>${r.vhid} <span class="muted">(secondary advskew: 100)</span></td>
+        </tr>`).join('')}
+      <tr>
+        <td>SYNC (${result.syncKey})</td>
+        <td>${escapeHtml(s.syncIpPrimary)}</td>
+        <td>${escapeHtml(s.syncIpSecondary)}</td>
+        <td class="muted">—</td>
+        <td class="muted">—</td>
+      </tr>
+    </table>
+    <p class="hint">Config sync target: ${s.hasyncEnabled ? `primary &rarr; ${escapeHtml(s.syncIpSecondary)} over the SYNC interface` : 'disabled'}.
+    DHCP failover: ${s.dhcpFailover.length ? s.dhcpFailover.join(', ') : 'none'}.</p>
+  `;
+
+  document.getElementById('previewPrimary').textContent = formatXmlPreview(result.primaryXml);
+  document.getElementById('previewSecondary').textContent = formatXmlPreview(result.secondaryXml);
+}
+
+function formatXmlPreview(xml) {
+  // not a full pretty-printer — just enough to make review bearable
+  return xml.replace(/></g, '>\n<');
+}
+
+document.getElementById('dlPrimary').addEventListener('click', () => downloadXml(lastResult.primaryXml, 'primary-updated.xml'));
+document.getElementById('dlSecondary').addEventListener('click', () => downloadXml(lastResult.secondaryXml, 'secondary-new.xml'));
+
+function downloadXml(xmlText, filename) {
+  const blob = new Blob([xmlText], { type: 'application/xml' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+document.getElementById('startOverBtn').addEventListener('click', () => location.reload());
+
+/* ---------- misc ---------- */
+
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+</script>
+</body>
+</html>
