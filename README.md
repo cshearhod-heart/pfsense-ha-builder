@@ -23,6 +23,8 @@ When reusing the current IP, the tool also sets `dhcpd/<iface>/gateway` explicit
 
 In "reuse" mode, the primary's new IP and the secondary's IP are pre-filled with the next two free host addresses in the subnet (e.g. current `.1` → suggests `.2`/`.3`), skipping the interface's own DHCP pool range if one exists so the suggestion can't collide with a live lease. Just a convenience — both fields stay editable.
 
+The CARP group password is pre-filled with a random 16-character value (`crypto.getRandomValues()` — the browser's own CSPRNG, not fetched from anywhere) — reveal it with the password field's own eye icon, or replace it. Kept to 16 characters deliberately: FreeBSD's CARP key buffer (`CARP_KEY_LEN` in `sys/netinet/ip_carp.h`) is 20 bytes copied with `strlcpy`, so anything past 19 characters is silently truncated by the kernel with no error.
+
 ## What it generates
 
 - **CARP virtual IPs** (`virtualip/vip`, `mode=carp`) for each selected interface, with VHIDs chosen to avoid colliding with anything already in the source config.

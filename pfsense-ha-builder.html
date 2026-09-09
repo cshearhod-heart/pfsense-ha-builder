@@ -168,7 +168,7 @@
           <input type="number" id="carpAdvbase" value="1" min="1" max="254">
         </div>
         <div>
-          <label for="carpPassword">CARP group password (applies to all VIPs below)</label>
+          <label for="carpPassword">CARP group password (applies to all VIPs below) — pre-filled with a random value, click the field's reveal icon to check it, or replace it</label>
           <input type="password" id="carpPassword" placeholder="shared CARP secret">
         </div>
       </div>
@@ -620,6 +620,7 @@ function renderAnalysis(a) {
 function renderForm(a) {
   document.getElementById('secHostname').value = a.hostname + '-b';
   document.getElementById('secDomain').value = a.domain;
+  document.getElementById('carpPassword').value = generateRandomPassword();
 
   ifaceRowState = {};
   const cardsEl = document.getElementById('ifaceCards');
@@ -1043,6 +1044,18 @@ function applyCommon(doc, role, s, cidr, syncKey) {
 
 function cryptoRandomId() {
   return Array.from(crypto.getRandomValues(new Uint8Array(8))).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Local CSPRNG only — no network call for "entropy". crypto.getRandomValues() draws directly
+// from the OS's own random source, which is not weaker than a string fetched from a website,
+// and fetching one would break this tool's core guarantee that nothing ever leaves the browser.
+// Length matters here: FreeBSD's CARP key buffer is CARP_KEY_LEN (20 bytes, see sys/netinet/ip_carp.h),
+// copied with strlcpy — anything past 19 characters is silently truncated by the kernel, no error.
+// Also avoids visually ambiguous characters (0/O, 1/l/I) since this may need to be read back by eye.
+function generateRandomPassword(length = 16) {
+  const charset = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const bytes = crypto.getRandomValues(new Uint8Array(length));
+  return Array.from(bytes).map(b => charset[b % charset.length]).join('');
 }
 
 /* ---------- Step 6: output ---------- */
