@@ -61,6 +61,7 @@ Repurposing an interface (e.g. an old GUEST slot manually moved to a VLAN, freei
 
 ## Invariants to preserve
 
+0. **`index.html` is a thin redirect to `pfsense-ha-builder.html`, not a second copy of the tool.** It exists only so GitHub Pages' root URL works without teammates needing to know the exact filename. Never duplicate tool logic into it — if the redirect ever needs to carry real content, something's wrong.
 1. **Fully offline, single distributable file.** No network calls, no server dependency. A pfSense backup can contain the admin password hash, CARP secrets, and VPN private keys — nothing should ever leave the browser tab.
 2. **Parser is schema-tolerant, not version-branching.** It only reads/writes the specific tags above and clones everything else in the source config verbatim. Don't add pfSense-version-specific branches without verifying against source first — the whole point of the tolerant design is to survive schema drift across CE/Plus releases without silently corrupting unrelated sections.
 3. **Never guess an XML tag name from memory alone.** Every field this tool writes was checked against pfSense's own PHP source. If a new field needs adding, verify it the same way (`curl raw.githubusercontent.com/pfsense/pfsense/master/src/...`) before writing generator code — a wrong tag name is a config that silently doesn't work on a real firewall.
