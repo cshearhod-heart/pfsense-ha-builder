@@ -4,7 +4,9 @@ Takes a config backup from a running pfSense firewall and generates a paired con
 
 ## Browser tool
 
-Open `pfsense-ha-builder.html` in any browser. Nothing is uploaded — parsing, generation, and download all happen locally in the tab. Distribute it as a file; no install, no server.
+**Live, always latest: https://cshearhod-heart.github.io/pfsense-ha-builder/**
+
+Or open `pfsense-ha-builder.html` directly in any browser — same tool, works offline too. Either way, nothing is uploaded anywhere: parsing, generation, and download all happen locally in the tab, including on the hosted page above (it's a static file; your config.xml never leaves your machine).
 
 1. Export the primary's backup: Diagnostics > Backup & Restore > Download configuration as XML.
 2. Upload it. The tool lists every interface, flags which ones can carry a CARP VIP (anything with a static IPv4 — DHCP/PPPoE interfaces are skipped), and calls out anything already partially configured for HA.
