@@ -1656,7 +1656,7 @@ function renderOutput(result) {
   const addrRefRows = reuseRows.filter(r => (analysis.ifaceAddrRefs.get(r.iface.key) || 0) > 0);
   if (addrRefRows.length) {
     warnings += `<div class="callout warn">
-      ${addrRefRows.map(r => `${analysis.ifaceAddrRefs.get(r.iface.key)} NAT/firewall rule(s) reference "<strong>${escapeHtml(r.iface.descr)} address</strong>"`).join('; ')}.
+      ${addrRefRows.map(r => { const n = analysis.ifaceAddrRefs.get(r.iface.key); return `${n} NAT/firewall rule${n === 1 ? '' : 's'} reference${n === 1 ? 's' : ''} "<strong>${escapeHtml(r.iface.descr)} address</strong>"`; }).join('; ')}.
       After the swap that means the non-floating real IP, not the VIP — port forwards and rules that should follow
       failover need to be repointed at the CARP VIP. Not changed by this tool.
     </div>`;
