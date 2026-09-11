@@ -13,7 +13,7 @@ let browser = null;
 async function getBrowser() { if (!browser) browser = await chromium.launch(); return browser; }
 async function closeBrowser() { if (browser) { await browser.close(); browser = null; } }
 
-// opts: { fixture: 'sample-config.xml', tweak: async (page) => {...}, name: 'label-for-output-files' }
+// opts: { fixture, tweak: async (page) => {...}, inspect: async (page) => {...}, name: 'label-for-output-files' }
 async function generate(opts) {
   const page = await (await getBrowser()).newPage();
   const pageErrors = [];
@@ -44,6 +44,9 @@ async function generate(opts) {
 
   await page.click('#generateBtn');
   await page.waitForTimeout(300);
+  // Runs against the live page before it closes, for assertions the serialized XML can't carry
+  // (rendered layout, computed styles). Returned as result.inspected.
+  const inspected = opts.inspect ? await opts.inspect(page) : undefined;
   const result = await page.evaluate(() => ({
     validation: document.getElementById('validationErrors').innerText.trim(),
     outputShown: !document.getElementById('step-output').hidden,
@@ -61,7 +64,7 @@ async function generate(opts) {
     fs.writeFileSync(path.join(OUT_DIR, `${name}-primary.xml`), result.primaryXml);
     fs.writeFileSync(path.join(OUT_DIR, `${name}-secondary.xml`), result.secondaryXml);
   }
-  return { ...result, formDefaults, pageErrors };
+  return { ...result, formDefaults, pageErrors, inspected };
 }
 
 // Tiny XML query helpers for assertions (Node has no DOMParser; use regex on the generated text,

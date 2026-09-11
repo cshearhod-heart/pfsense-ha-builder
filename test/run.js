@@ -38,6 +38,30 @@ test('kea-existing-ha: primary is reported as unchanged, secondary has a flipped
 
 // ---------- later tasks append their tests below this line ----------
 
+// The two download cards carry notes of different lengths, which left their buttons at
+// different heights. They're bottom-aligned now; assert the geometry rather than trust the CSS.
+const cardGeometry = page => page.evaluate(() => Array.from(document.querySelectorAll('.download-card')).map(c => {
+  const card = c.getBoundingClientRect(), btn = c.querySelector('button').getBoundingClientRect();
+  return { cardW: Math.round(card.width), btnW: Math.round(btn.width), btnBottom: Math.round(btn.bottom), gapBelow: Math.round(card.bottom - btn.bottom) };
+}));
+
+test('download buttons sit on a common baseline, at both widths', async () => {
+  // The "primary unchanged" case has the biggest imbalance between the two notes.
+  const r = await generate({ fixture: 'sample-config-kea-existing-ha.xml', name: 'cards-wide', inspect: cardGeometry });
+  assert.equal(r.inspected.length, 2);
+  const [a, b] = r.inspected;
+  assert.equal(a.btnBottom, b.btnBottom, 'buttons must share a baseline despite different note lengths');
+  assert.equal(a.gapBelow, b.gapBelow);
+
+  // Wrapped to one column, the buttons must still hug their own text rather than stretch to
+  // the card width, which is what a flex-column child does by default.
+  const narrow = await generate({ fixture: 'sample-config-kea-existing-ha.xml', name: 'cards-narrow', inspect: async page => {
+    await page.setViewportSize({ width: 420, height: 900 });
+    return cardGeometry(page);
+  }});
+  for (const c of narrow.inspected) assert.ok(c.btnW < c.cardW, 'button should not stretch to the card width');
+});
+
 test('task1: WAN suggestion skips the ISP gateway and validation rejects it', async () => {
   const r = await generate({ fixture: 'sample-config.xml' });
   assert.equal(r.formDefaults.pip_wan, '203.0.113.11', 'primary new IP must skip .9 (gateway) and .10 (current)');

@@ -120,10 +120,17 @@
   ul.plain { margin: 6px 0 0; padding-left: 18px; }
   .download-row { display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
   .download-card {
+    /* Column layout so the button can be pushed to the bottom: the cards already stretch to
+       equal height, but the note text differs in length, which left the two buttons at
+       different heights. */
     flex: 1; min-width: 260px; border: 1px solid var(--border); border-radius: 8px; padding: 16px;
+    display: flex; flex-direction: column;
   }
   .download-card h4 { margin: 0 0 4px; font-size: 14px; }
   .download-card p { margin: 0 0 12px; color: var(--text-dim); font-size: 12.5px; }
+  /* margin-top:auto eats the leftover vertical space; align-self keeps the button hugging its
+     own text rather than stretching to the card width the way a flex column child would. */
+  .download-card button { margin-top: auto; align-self: flex-start; }
   pre.xmlpreview {
     background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px;
     font: 12px/1.5 var(--mono); overflow-x: auto; max-height: 360px; white-space: pre-wrap; word-break: break-all;
