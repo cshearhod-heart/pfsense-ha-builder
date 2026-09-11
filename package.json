@@ -1,0 +1,12 @@
+{
+  "name": "pfsense-ha-builder",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Test harness for the single-file pfSense HA/CARP builder. The tool itself has no dependencies.",
+  "scripts": {
+    "test": "node test/run.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.47.0"
+  }
+}

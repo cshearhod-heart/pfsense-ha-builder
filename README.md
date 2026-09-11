@@ -83,6 +83,16 @@ Kea's HA is a completely different mechanism from ISC's `failover_peerip` — a 
 
 `test-fixtures/sample-config.xml` is synthetic (fake IPs, fake hostnames, no real credentials) — safe to commit and safe to open. Never replace it with a real backup; real config.xml files are gitignored by default (see `.gitignore`).
 
+## Testing
+
+The tool itself has no dependencies and never needs a build step — the test harness is dev-only tooling that drives the real page in headless Chromium.
+
+```
+npm install
+npx playwright install chromium
+npm test
+```
+
 ## Testing against real hardware
 
 Two Netgate units are available for this. Always: import the *secondary* file onto a factory-reset or otherwise non-production unit first — never onto a box already carrying live traffic. Review the *primary* file's diff before reapplying it to the live primary.
