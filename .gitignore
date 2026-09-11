@@ -1,7 +1,17 @@
 # Real pfSense backups contain admin password hashes, CARP/IPsec/OpenVPN secrets,
 # and full network topology. Never commit a real config.xml to this repo.
 *.xml
-!test-fixtures/*.xml
+
+# Fixtures are allowlisted BY NAME, not by the test-fixtures/*.xml wildcard. A wildcard
+# exception re-includes any .xml dropped in that folder — including a real customer backup
+# saved there while testing, which git would then happily stage. This repo is public, so that
+# would be permanent. Adding a new fixture means adding a line here, deliberately.
+!test-fixtures/sample-config.xml
+!test-fixtures/sample-config-existing-ha.xml
+!test-fixtures/sample-config-kea-existing-ha.xml
+!test-fixtures/sample-config-multi-vip.xml
+!test-fixtures/sample-config-explicit-dns.xml
+!test-fixtures/sample-config-adopted-dhcp-gap.xml
 .DS_Store
 node_modules/
 test/out/
