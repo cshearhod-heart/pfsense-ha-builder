@@ -1,0 +1,83 @@
+<?xml version="1.0"?>
+<!-- Synthetic pfSense config.xml for local testing of pfsense-ha-builder.
+     Same as sample-config.xml but with explicit DHCP DNS servers on LAN (internal AD DCs,
+     not the firewall's own address) — these must survive a reuse-mode swap untouched.
+     All IPs, credentials, and identifiers are fake. Never replace this with a real backup. -->
+<pfsense version="24.11">
+	<version>22.4</version>
+	<lastchange></lastchange>
+	<system>
+		<hostname>fw-test</hostname>
+		<domain>lab.internal</domain>
+		<dhcpbackend>isc</dhcpbackend>
+	</system>
+	<interfaces>
+		<wan>
+			<if>igb0</if>
+			<descr>WAN</descr>
+			<enable></enable>
+			<ipaddr>203.0.113.10</ipaddr>
+			<subnet>29</subnet>
+			<gateway>WANGW</gateway>
+		</wan>
+		<lan>
+			<if>igb1</if>
+			<descr>LAN</descr>
+			<enable></enable>
+			<ipaddr>10.10.10.1</ipaddr>
+			<subnet>24</subnet>
+		</lan>
+		<opt1>
+			<if>igb2</if>
+			<descr>GUEST</descr>
+			<enable></enable>
+			<ipaddr>dhcp</ipaddr>
+		</opt1>
+	</interfaces>
+	<gateways>
+		<gateway_item>
+			<interface>wan</interface>
+			<gateway>203.0.113.9</gateway>
+			<name>WANGW</name>
+			<weight>1</weight>
+			<ipprotocol>inet</ipprotocol>
+			<defaultgw></defaultgw>
+			<descr>WAN gateway</descr>
+		</gateway_item>
+	</gateways>
+	<dhcpd>
+		<lan>
+			<enable></enable>
+			<range>
+				<from>10.10.10.100</from>
+				<to>10.10.10.200</to>
+			</range>
+			<failover_peerip></failover_peerip>
+			<dnsserver>10.10.10.10</dnsserver>
+			<dnsserver>10.10.10.11</dnsserver>
+		</lan>
+	</dhcpd>
+	<nat>
+		<outbound>
+			<mode>automatic</mode>
+		</outbound>
+		<rule>
+			<interface>wan</interface>
+			<protocol>tcp</protocol>
+			<source><any></any></source>
+			<destination><network>wanip</network><port>443</port></destination>
+			<target>10.10.10.20</target>
+			<local-port>443</local-port>
+			<descr>Example port forward that should point at the VIP after the swap</descr>
+		</rule>
+	</nat>
+	<unbound>
+		<enable></enable>
+	</unbound>
+	<virtualip></virtualip>
+	<revision>
+		<time>1799000000</time>
+		<description>Synthetic fixture for pfsense-ha-builder testing</description>
+		<username>admin@lab.internal</username>
+	</revision>
+</pfsense>

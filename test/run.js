@@ -79,6 +79,20 @@ test('task3: reuse mode sets dhcpd dnsserver to the VIP when a local resolver is
   }
 });
 
+// The override exists to fix a fallback, not to impose the firewall as DNS. An admin who has
+// already pointed the scope at internal DNS servers has no fallback to fix.
+test('task3b: an explicit DHCP DNS list survives a reuse swap untouched', async () => {
+  const r = await generate({ fixture: 'sample-config-explicit-dns.xml' });
+  for (const xml of [r.primaryXml, r.secondaryXml]) {
+    const lan = section(section(xml, '<dhcpd>', '</dhcpd>'), '<lan>', '</lan>');
+    assert.deepEqual(texts(lan, 'dnsserver'), ['10.10.10.10', '10.10.10.11'], 'admin DNS list must be preserved verbatim');
+    assert.equal(text(lan, 'gateway'), '10.10.10.1', 'gateway override still applies');
+  }
+  // ...and the output panel must not claim a DNS override it did not perform.
+  assert.doesNotMatch(r.warningsText, /The same was done for \/dnsserver/);
+  assert.match(r.warningsText, /already has its own DNS server list, which was left exactly as it is/);
+});
+
 test('task4: every CARP VIP on the secondary is bumped +100, none on the primary', async () => {
   const r = await generate({ fixture: 'sample-config-multi-vip.xml' });
   const carpSkews = xml => section(xml, '<virtualip>', '</virtualip>').split('<vip>')

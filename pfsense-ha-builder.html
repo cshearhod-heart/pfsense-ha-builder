@@ -645,6 +645,7 @@ function analyzeConfig(doc) {
   const dhcpEnabledIfaces = [];
   const dhcpRanges = new Map(); // key -> {from, to} ints, so address suggestion can avoid the active pool
   const existingFailoverPeerIp = new Map(); // key -> ip already configured, revealing the secondary's expected address
+  const dhcpDnsFallbackIfaces = new Set(); // keys with no explicit <dnsserver>, i.e. where services.inc would hand out $ifcfgip
   if (dhcpdEl) {
     for (const node of dhcpdEl.childNodes) {
       if (node.nodeType !== 1) continue;
@@ -657,6 +658,9 @@ function analyzeConfig(doc) {
       }
       const fpi = childText(node, 'failover_peerip');
       if (isValidIp(fpi)) existingFailoverPeerIp.set(node.nodeName, fpi);
+      // <dnsserver> repeats (services.inc joins the array), so "has explicit DNS" means any
+      // sibling with a value — not just the first one.
+      if (!findChildren(node, 'dnsserver').some(d => d.textContent.trim() !== '')) dhcpDnsFallbackIfaces.add(node.nodeName);
     }
   }
 
@@ -747,7 +751,7 @@ function analyzeConfig(doc) {
     hostname, domain, backend,
     configVersion: childText(root, 'version') || root.getAttribute('version') || 'unknown',
     interfaces, usedPhysIfs, physIfOwner, existingVips, existingVipByInterface, usedVhids,
-    dhcpEnabledIfaces, dhcpRanges, existingFailoverPeerIp, existingHasync, existingHasyncDetails, existingKeaHa,
+    dhcpEnabledIfaces, dhcpRanges, existingFailoverPeerIp, dhcpDnsFallbackIfaces, existingHasync, existingHasyncDetails, existingKeaHa,
     reservedByIface, gatewayIfaces, localDnsEnabled, outboundNatMode, ifaceAddrRefs,
     ipsecTunnels, openvpnServers, openvpnClients, certCount,
   };
@@ -755,6 +759,15 @@ function analyzeConfig(doc) {
 
 // Starts at 10, not 1. VHIDs must be unique per L2 domain and share the 00:00:5e:00:01:xx
 // MAC space with VRRP, so group 1 is the likeliest collision with an upstream router.
+// Whether the DHCP DNS override actually applies to an interface. services.inc only falls back
+// to $ifcfgip for domain-name-servers when the scope has no explicit <dnsserver> AND a local
+// resolver/forwarder is running; with explicit DNS servers set (internal AD DCs, say) or no
+// local resolver, nothing needs rewriting and the admin's list must survive untouched.
+// Deliberately shared between applyCommon and renderOutput rather than re-derived in each.
+function dhcpDnsOverrideApplies(ifaceKey) {
+  return analysis.localDnsEnabled && analysis.dhcpDnsFallbackIfaces.has(ifaceKey);
+}
+
 function nextVhid(taken) {
   for (let v = 10; v <= 255; v++) if (!taken.has(v)) return v;
   return null;
@@ -1554,10 +1567,7 @@ function applyCommon(doc, role, s, cidr, syncKey, existingSyncActive) {
     // lose DNS on failover exactly the way they'd lose their gateway. Only touch it when that
     // fallback would actually fire — if the admin set explicit DNS servers, or runs no local
     // resolver (system DNS is handed out instead), leave it alone.
-    const dnsEl = findChild(dhcpIfEl, 'dnsserver');
-    if (analysis.localDnsEnabled && (!dnsEl || dnsEl.textContent.trim() === '')) {
-      setText(doc, dhcpIfEl, 'dnsserver', row.iface.ipaddr);
-    }
+    if (dhcpDnsOverrideApplies(row.iface.key)) setText(doc, dhcpIfEl, 'dnsserver', row.iface.ipaddr);
   }
 
   // --- revision bump ---
@@ -1628,11 +1638,15 @@ function renderOutput(result) {
   }
   const reuseRows = s.perIface.filter(r => r.mode === 'reuse');
   const reuseDhcpRows = reuseRows.filter(r => analysis.dhcpEnabledIfaces.includes(r.iface.key));
+  const dnsOverrideRows = reuseDhcpRows.filter(r => dhcpDnsOverrideApplies(r.iface.key));
+  const dnsKeptRows = reuseDhcpRows.filter(r => !dhcpDnsOverrideApplies(r.iface.key));
   if (reuseDhcpRows.length) {
     warnings += `<div class="callout ok">
-      DHCP gateway${analysis.localDnsEnabled ? ' and DNS server' : ''} override set automatically for ${reuseDhcpRows.map(r => escapeHtml(r.iface.descr)).join(', ')}
-      (<code>dhcpd/&lt;iface&gt;/gateway</code>${analysis.localDnsEnabled ? ' and <code>/dnsserver</code>' : ''} = the VIP) — without this, pfSense would hand DHCP clients the
-      new non-floating real IP as their gateway${analysis.localDnsEnabled ? ' and DNS server' : ''} instead of the floating one, quietly defeating HA for them.${analysis.localDnsEnabled ? ' The DNS half only applies where the Resolver or Forwarder is enabled and no explicit DNS servers were set — an interface with its own DNS list is left alone.' : ''}
+      DHCP gateway override (<code>dhcpd/&lt;iface&gt;/gateway</code> = the VIP) set automatically for ${reuseDhcpRows.map(r => escapeHtml(r.iface.descr)).join(', ')}
+      — without this, pfSense would hand DHCP clients the new non-floating real IP as their gateway
+      instead of the floating one, quietly defeating HA for them.
+      ${dnsOverrideRows.length ? `The same was done for <code>/dnsserver</code> on ${dnsOverrideRows.map(r => escapeHtml(r.iface.descr)).join(', ')}, ${dnsOverrideRows.length === 1 ? 'which had no DNS servers of its own' : 'which had no DNS servers of their own'} — pfSense would otherwise hand out that same non-floating IP as the DNS server.` : ''}
+      ${dnsKeptRows.length ? `<strong>${dnsKeptRows.map(r => escapeHtml(r.iface.descr)).join(', ')}</strong> already ${dnsKeptRows.length === 1 ? 'has its own DNS server list, which was' : 'have their own DNS server lists, which were'} left exactly as ${dnsKeptRows.length === 1 ? 'it is' : 'they are'} — the fallback never fires there, so there is nothing to rewrite.` : ''}
     </div>`;
   }
   const newModeRows = s.perIface.filter(r => r.mode === 'new');
