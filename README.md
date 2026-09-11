@@ -81,6 +81,7 @@ Kea's HA is a completely different mechanism from ISC's `failover_peerip` — a 
 ## Deliberately out of scope (v1)
 - **IPsec, OpenVPN, certificates.** Carried through to the secondary unchanged (not modified, not omitted). The tool flags their presence so you know to review whether anything there is endpoint-specific — it does not guess at what should change.
 - **Freeing up a physical port yourself** (e.g. moving an interface onto a VLAN to make room for SYNC) is on you to do first, on the real primary, before exporting the backup this tool reads. The tool doesn't restructure your interface layout — it only builds the HA pair from whatever layout is already in the file.
+- **NAT.** Flagged, never rewritten. In "reuse" mode the interface's real address changes, and two things quietly stop pointing at the floating address as a result. Automatic outbound NAT translates to the *interface* address, so each node would egress from its own non-floating IP and states couldn't fail over — Netgate's HA guide requires Hybrid or Manual outbound NAT with the CARP VIP as the translation address. Separately, any NAT or firewall rule whose source or destination is the "*interface* address" macro (`<network>wanip</network>` and its v4/v6 variants) now means the non-floating IP. The output panel counts and names both; fixing them is a deliberate, reviewed change to make on the primary after import, and config sync carries it to the secondary.
 
 ## Test fixtures
 

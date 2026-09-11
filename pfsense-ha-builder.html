@@ -710,6 +710,33 @@ function analyzeConfig(doc) {
   const dnsmasqEl = findChild(root, 'dnsmasq');
   const localDnsEnabled = !!((unboundEl && findChild(unboundEl, 'enable')) || (dnsmasqEl && findChild(dnsmasqEl, 'enable')));
 
+  // Things that silently stop pointing at the floating address once a 'reuse' swap changes the
+  // interface's real IP. Read-only: reported in the output panel, never rewritten (invariant #4).
+  // Automatic outbound NAT translates to the *interface* address, so each node would egress from
+  // its own non-floating IP and states couldn't fail over; Netgate's HA recipe requires
+  // Hybrid/Manual with the CARP VIP as the translation address.
+  const natEl = findChild(root, 'nat');
+  const outboundEl = natEl ? findChild(natEl, 'outbound') : null;
+  const outboundNatMode = outboundEl ? (childText(outboundEl, 'mode') || 'automatic') : 'automatic';
+  // "<key> address" macros: get_specialnet (util.inc) builds these as the interface key plus
+  // "ip", "ip4" or "ip6" — matching the bare suffix would both miss the v4/v6 variants and risk
+  // colliding with unrelated macro names, so match the whole token against real interface keys.
+  const ifaceKeys = new Set(interfaces.map(i => i.key));
+  const ifaceAddrRefs = new Map(); // interface key -> count of NAT + filter rules using "<key> address"
+  const countAddrRefs = rules => {
+    for (const r of rules) {
+      for (const side of ['source', 'destination']) {
+        const net = childText(findChild(r, side), 'network');
+        if (!net) continue;
+        const m = /^(.+?)ip[46]?$/.exec(net);
+        if (m && ifaceKeys.has(m[1])) ifaceAddrRefs.set(m[1], (ifaceAddrRefs.get(m[1]) || 0) + 1);
+      }
+    }
+  };
+  if (natEl) countAddrRefs(findChildren(natEl, 'rule'));
+  const filterEl = findChild(root, 'filter');
+  if (filterEl) countAddrRefs(findChildren(filterEl, 'rule'));
+
   const ipsecTunnels = findChild(root, 'ipsec') ? findChildren(findChild(root, 'ipsec'), 'phase1').length : 0;
   const openvpnServers = findChild(root, 'openvpn') ? findChildren(findChild(root, 'openvpn'), 'openvpn-server').length : 0;
   const openvpnClients = findChild(root, 'openvpn') ? findChildren(findChild(root, 'openvpn'), 'openvpn-client').length : 0;
@@ -720,7 +747,7 @@ function analyzeConfig(doc) {
     configVersion: childText(root, 'version') || root.getAttribute('version') || 'unknown',
     interfaces, usedPhysIfs, physIfOwner, existingVips, existingVipByInterface, usedVhids,
     dhcpEnabledIfaces, dhcpRanges, existingFailoverPeerIp, existingHasync, existingHasyncDetails, existingKeaHa,
-    reservedByIface, gatewayIfaces, localDnsEnabled,
+    reservedByIface, gatewayIfaces, localDnsEnabled, outboundNatMode, ifaceAddrRefs,
     ipsecTunnels, openvpnServers, openvpnClients, certCount,
   };
 }
@@ -1604,6 +1631,24 @@ function renderOutput(result) {
       ${newModeRows.map(r => escapeHtml(r.iface.descr)).join(', ')} kept the current IP on the primary with a
       brand-new VIP. Anything downstream still pointed at the <em>current</em> address (static routes, DNS,
       monitoring, non-DHCP clients) gets no HA protection unless it's repointed at the new VIP.
+    </div>`;
+  }
+  const reuseWanRows = reuseRows.filter(r => analysis.gatewayIfaces.has(r.iface.key));
+  if (reuseWanRows.length && analysis.outboundNatMode === 'automatic') {
+    warnings += `<div class="callout danger">
+      <strong>Outbound NAT is Automatic</strong> and ${reuseWanRows.map(r => escapeHtml(r.iface.descr)).join(', ')} changed real IP.
+      Automatic outbound NAT translates to the interface's <em>real</em> address, so each node will NAT from its own
+      non-floating IP and states cannot fail over. Netgate's HA guide requires Hybrid or Manual outbound NAT with the
+      CARP VIP as the translation address. This tool does not rewrite NAT — fix it on the primary after import
+      (Firewall &gt; NAT &gt; Outbound) and let config sync carry it to the secondary.
+    </div>`;
+  }
+  const addrRefRows = reuseRows.filter(r => (analysis.ifaceAddrRefs.get(r.iface.key) || 0) > 0);
+  if (addrRefRows.length) {
+    warnings += `<div class="callout warn">
+      ${addrRefRows.map(r => `${analysis.ifaceAddrRefs.get(r.iface.key)} NAT/firewall rule(s) reference "<strong>${escapeHtml(r.iface.descr)} address</strong>"`).join('; ')}.
+      After the swap that means the non-floating real IP, not the VIP — port forwards and rules that should follow
+      failover need to be repointed at the CARP VIP. Not changed by this tool.
     </div>`;
   }
   warnings += `<div class="callout warn">

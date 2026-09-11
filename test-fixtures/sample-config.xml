@@ -53,6 +53,20 @@
 			<failover_peerip></failover_peerip>
 		</lan>
 	</dhcpd>
+	<nat>
+		<outbound>
+			<mode>automatic</mode>
+		</outbound>
+		<rule>
+			<interface>wan</interface>
+			<protocol>tcp</protocol>
+			<source><any></any></source>
+			<destination><network>wanip</network><port>443</port></destination>
+			<target>10.10.10.20</target>
+			<local-port>443</local-port>
+			<descr>Example port forward that should point at the VIP after the swap</descr>
+		</rule>
+	</nat>
 	<unbound>
 		<enable></enable>
 	</unbound>

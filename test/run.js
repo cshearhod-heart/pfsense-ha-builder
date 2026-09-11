@@ -117,6 +117,13 @@ test("task6: adopted Kea HA uses the primary's remotename for the secondary loca
   assert.match(r.warningsText, /already names its peer/);
 });
 
+test('task7: automatic outbound NAT and "WAN address" rules are flagged in reuse mode', async () => {
+  const r = await generate({ fixture: 'sample-config.xml' });
+  assert.match(r.warningsText, /Outbound NAT is Automatic/);
+  assert.match(r.warningsText, /1 NAT\/firewall rule\(s\) reference "WAN address"/);
+  assert.ok(r.primaryXml.includes('<network>wanip</network>'), 'NAT rule carried through unmodified');
+});
+
 (async () => {
   let failed = 0;
   for (const t of tests) {
