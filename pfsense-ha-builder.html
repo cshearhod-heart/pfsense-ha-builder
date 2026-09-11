@@ -379,15 +379,21 @@ function sameSubnet(ipA, ipB, bits) {
 
 // Suggests the next two free host addresses in an interface's subnet for 'reuse' mode
 // (current IP -> VIP, so both real IPs need to be *new*). Skips the network/broadcast
-// addresses, the current address itself, and — importantly — the interface's own DHCP
-// pool range if one exists, so the suggestion can't collide with a lease pfSense might
-// hand to an actual client.
+// addresses, the current address itself, the interface's own DHCP pool range if one exists
+// (so the suggestion can't collide with a lease pfSense might hand to an actual client),
+// and every address the source config already reserves on this interface — gateways,
+// existing VIPs of any mode, static mappings (analyzeConfig's reservedByIface), plus any
+// extraExclude. The gateway exclusion is load-bearing, not defensive: on a /29 WAN the ISP
+// gateway is typically network+1, which is exactly where "next free host" lands first, and
+// handing a firewall its own upstream gateway's address costs it the default route.
 function suggestRealIps(iface, dhcpRange, extraExclude) {
   const mask = iface.subnetBits === 0 ? 0 : (0xFFFFFFFF << (32 - iface.subnetBits)) >>> 0;
   const netInt = (ipToInt(iface.ipaddr) & mask) >>> 0;
   const broadcastInt = (netInt | (~mask >>> 0)) >>> 0;
   const currentInt = ipToInt(iface.ipaddr);
   const excludeInts = new Set((extraExclude || []).map(ipToInt).filter(n => n !== null));
+  const reserved = analysis && analysis.reservedByIface && analysis.reservedByIface.get(iface.key);
+  if (reserved) for (const n of reserved) excludeInts.add(n);
   const found = [];
   for (let cand = netInt + 1; cand < broadcastInt && found.length < 2; cand++) {
     if (cand === currentInt) continue;
@@ -622,6 +628,34 @@ function analyzeConfig(doc) {
     };
   }
 
+  // Addresses that must never be suggested or accepted as a new real IP / VIP on an interface:
+  // every gateway address on that interface, every existing VIP of any mode, and every DHCP
+  // static mapping. On a small WAN block the ISP gateway is usually the very next address,
+  // which is exactly where a naive "next free host" suggestion lands.
+  const reservedByIface = new Map(); // interface key -> Set<int>
+  const gatewayIfaces = new Set();   // interfaces that own a gateway_item (i.e. WAN-type)
+  const reserve = (key, ip) => {
+    const n = ipToInt(ip || '');
+    if (!key || n === null) return;
+    if (!reservedByIface.has(key)) reservedByIface.set(key, new Set());
+    reservedByIface.get(key).add(n);
+  };
+  const gwEl = findChild(root, 'gateways');
+  if (gwEl) {
+    for (const g of findChildren(gwEl, 'gateway_item')) {
+      const gwIface = childText(g, 'interface');
+      if (gwIface) gatewayIfaces.add(gwIface);
+      reserve(gwIface, childText(g, 'gateway'));
+    }
+  }
+  if (vipEl) for (const vip of findChildren(vipEl, 'vip')) reserve(childText(vip, 'interface'), childText(vip, 'subnet'));
+  if (dhcpdEl) {
+    for (const node of dhcpdEl.childNodes) {
+      if (node.nodeType !== 1) continue;
+      for (const sm of findChildren(node, 'staticmap')) reserve(node.nodeName, childText(sm, 'ipaddr'));
+    }
+  }
+
   const ipsecTunnels = findChild(root, 'ipsec') ? findChildren(findChild(root, 'ipsec'), 'phase1').length : 0;
   const openvpnServers = findChild(root, 'openvpn') ? findChildren(findChild(root, 'openvpn'), 'openvpn-server').length : 0;
   const openvpnClients = findChild(root, 'openvpn') ? findChildren(findChild(root, 'openvpn'), 'openvpn-client').length : 0;
@@ -632,6 +666,7 @@ function analyzeConfig(doc) {
     configVersion: childText(root, 'version') || root.getAttribute('version') || 'unknown',
     interfaces, usedPhysIfs, physIfOwner, existingVips, existingVipByInterface, usedVhids,
     dhcpEnabledIfaces, dhcpRanges, existingFailoverPeerIp, existingHasync, existingHasyncDetails, existingKeaHa,
+    reservedByIface, gatewayIfaces,
     ipsecTunnels, openvpnServers, openvpnClients, certCount,
   };
 }
@@ -1120,6 +1155,15 @@ function validateForm() {
     if (seenVhids.has(row.vhid)) errs.push(`${label}: VHID ${row.vhid} is used more than once in this session.`);
     seenVhids.add(row.vhid);
     if (!row.secPhysIf) errs.push(`${label}: secondary physical port is required.`);
+    // A hand-typed address gets the same treatment as a suggested one — the suggestion engine
+    // avoiding the gateway is no protection if the field is editable (and it is).
+    const reserved = analysis.reservedByIface.get(row.iface.key) || new Set();
+    const candidates = row.existing ? [row.secIp] : [row.primaryIp, row.secIp, row.vip];
+    for (const ip of new Set(candidates)) {
+      if (isValidIp(ip) && reserved.has(ipToInt(ip))) {
+        errs.push(`${label}: ${ip} is already in use on this interface in the uploaded config (a gateway address, an existing virtual IP, or a DHCP static mapping) — it cannot be assigned as a real IP or VIP.`);
+      }
+    }
   }
 
   if (!s.syncIfPrimary) errs.push('SYNC interface: primary physical port is required.');

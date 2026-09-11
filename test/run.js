@@ -38,6 +38,20 @@ test('kea-existing-ha: primary is reported as unchanged, secondary has a flipped
 
 // ---------- later tasks append their tests below this line ----------
 
+test('task1: WAN suggestion skips the ISP gateway and validation rejects it', async () => {
+  const r = await generate({ fixture: 'sample-config.xml' });
+  assert.equal(r.formDefaults.pip_wan, '203.0.113.11', 'primary new IP must skip .9 (gateway) and .10 (current)');
+  assert.equal(r.formDefaults.sip_wan, '203.0.113.12');
+  const wan = section(r.primaryXml, '<wan>', '</wan>');
+  assert.notEqual(text(wan, 'ipaddr'), '203.0.113.9');
+
+  const r2 = await generate({ fixture: 'sample-config.xml', name: 'task1-typed-gateway', tweak: async page => {
+    await page.fill('#pip_wan', '203.0.113.9');
+  }});
+  assert.match(r2.validation, /203\.0\.113\.9 is already in use/);
+  assert.equal(r2.outputShown, false);
+});
+
 (async () => {
   let failed = 0;
   for (const t of tests) {
