@@ -53,6 +53,9 @@
 			<failover_peerip></failover_peerip>
 		</lan>
 	</dhcpd>
+	<unbound>
+		<enable></enable>
+	</unbound>
 	<virtualip></virtualip>
 	<revision>
 		<time>1799000000</time>

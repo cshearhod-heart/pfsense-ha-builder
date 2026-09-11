@@ -70,6 +70,15 @@ test('task2: both files get a pass rule on the SYNC interface; adopt path adds n
   assert.equal(adopted.secondaryXml.includes('HA: pass from SYNC net'), false);
 });
 
+test('task3: reuse mode sets dhcpd dnsserver to the VIP when a local resolver is enabled', async () => {
+  const r = await generate({ fixture: 'sample-config.xml' });
+  for (const xml of [r.primaryXml, r.secondaryXml]) {
+    const lan = section(section(xml, '<dhcpd>', '</dhcpd>'), '<lan>', '</lan>');
+    assert.equal(text(lan, 'gateway'), '10.10.10.1');
+    assert.equal(text(lan, 'dnsserver'), '10.10.10.1');
+  }
+});
+
 (async () => {
   let failed = 0;
   for (const t of tests) {

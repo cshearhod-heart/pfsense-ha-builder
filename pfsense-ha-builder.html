@@ -702,6 +702,14 @@ function analyzeConfig(doc) {
     }
   }
 
+  // Whether pfSense would hand out its own interface IP as the DHCP DNS server. services.inc
+  // (both the ISC and Kea code paths) falls back to `domain-name-servers {$ifcfgip}` when
+  // dhcpd/<iface>/dnsserver is empty AND the Forwarder or Resolver is enabled. With neither
+  // running it hands out the system DNS servers instead, and the fallback never fires.
+  const unboundEl = findChild(root, 'unbound');
+  const dnsmasqEl = findChild(root, 'dnsmasq');
+  const localDnsEnabled = !!((unboundEl && findChild(unboundEl, 'enable')) || (dnsmasqEl && findChild(dnsmasqEl, 'enable')));
+
   const ipsecTunnels = findChild(root, 'ipsec') ? findChildren(findChild(root, 'ipsec'), 'phase1').length : 0;
   const openvpnServers = findChild(root, 'openvpn') ? findChildren(findChild(root, 'openvpn'), 'openvpn-server').length : 0;
   const openvpnClients = findChild(root, 'openvpn') ? findChildren(findChild(root, 'openvpn'), 'openvpn-client').length : 0;
@@ -712,7 +720,7 @@ function analyzeConfig(doc) {
     configVersion: childText(root, 'version') || root.getAttribute('version') || 'unknown',
     interfaces, usedPhysIfs, physIfOwner, existingVips, existingVipByInterface, usedVhids,
     dhcpEnabledIfaces, dhcpRanges, existingFailoverPeerIp, existingHasync, existingHasyncDetails, existingKeaHa,
-    reservedByIface, gatewayIfaces,
+    reservedByIface, gatewayIfaces, localDnsEnabled,
     ipsecTunnels, openvpnServers, openvpnClients, certCount,
   };
 }
@@ -1465,6 +1473,15 @@ function applyCommon(doc, role, s, cidr, syncKey, existingSyncActive) {
     const dhcpIfEl = findChild(dhcpdGw, row.iface.key);
     if (!dhcpIfEl) continue;
     setText(doc, dhcpIfEl, 'gateway', row.iface.ipaddr);
+    // Same trap for DNS: with <dnsserver> empty and the Resolver/Forwarder enabled, services.inc
+    // hands out $ifcfgip (the real, now non-floating IP) as domain-name-servers, so DHCP clients
+    // lose DNS on failover exactly the way they'd lose their gateway. Only touch it when that
+    // fallback would actually fire — if the admin set explicit DNS servers, or runs no local
+    // resolver (system DNS is handed out instead), leave it alone.
+    const dnsEl = findChild(dhcpIfEl, 'dnsserver');
+    if (analysis.localDnsEnabled && (!dnsEl || dnsEl.textContent.trim() === '')) {
+      setText(doc, dhcpIfEl, 'dnsserver', row.iface.ipaddr);
+    }
   }
 
   // --- revision bump ---
@@ -1534,9 +1551,9 @@ function renderOutput(result) {
   const reuseDhcpRows = reuseRows.filter(r => analysis.dhcpEnabledIfaces.includes(r.iface.key));
   if (reuseDhcpRows.length) {
     warnings += `<div class="callout ok">
-      DHCP gateway override set automatically for ${reuseDhcpRows.map(r => escapeHtml(r.iface.descr)).join(', ')}
-      (<code>dhcpd/&lt;iface&gt;/gateway</code> = the VIP) — without this, pfSense would hand DHCP clients the
-      new non-floating real IP as their gateway instead of the floating one, quietly defeating HA for them.
+      DHCP gateway${analysis.localDnsEnabled ? ' and DNS server' : ''} override set automatically for ${reuseDhcpRows.map(r => escapeHtml(r.iface.descr)).join(', ')}
+      (<code>dhcpd/&lt;iface&gt;/gateway</code>${analysis.localDnsEnabled ? ' and <code>/dnsserver</code>' : ''} = the VIP) — without this, pfSense would hand DHCP clients the
+      new non-floating real IP as their gateway${analysis.localDnsEnabled ? ' and DNS server' : ''} instead of the floating one, quietly defeating HA for them.${analysis.localDnsEnabled ? ' The DNS half only applies where the Resolver or Forwarder is enabled and no explicit DNS servers were set — an interface with its own DNS list is left alone.' : ''}
     </div>`;
   }
   const newModeRows = s.perIface.filter(r => r.mode === 'new');
