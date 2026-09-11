@@ -1451,7 +1451,13 @@ function applyCommon(doc, role, s, cidr, syncKey, existingSyncActive) {
       for (const tag of ['enable', 'role', 'localname', 'localip', 'localport', 'remotename', 'remoteip', 'remoteport']) removeChildTag(ha, tag);
       if (existing.enable) ha.appendChild(doc.createElement('enable'));
       setText(doc, ha, 'role', existing.role === 'primary' ? 'standby' : 'primary');
-      setText(doc, ha, 'localname', s.secHostname);
+      // The primary already names its peer, and Kea's HA hook requires both sides to agree on
+      // server names — a mismatch shows up as rejected lease updates and a partner stuck in
+      // "waiting". So the secondary answers to the primary's existing remotename, not to
+      // whatever hostname was typed in this form. (pfSense's own sync doesn't transmit
+      // localname at all — the receiver falls back to kea_defaults('name') — which makes the
+      // primary's remotename the authoritative value here.)
+      setText(doc, ha, 'localname', existing.remotename || s.secHostname);
       setText(doc, ha, 'localip', s.syncIpSecondary);
       setText(doc, ha, 'remotename', existing.localname);
       setText(doc, ha, 'remoteip', s.syncIpPrimary);
@@ -1553,6 +1559,9 @@ function renderOutput(result) {
       warnings += `<div class="callout danger">Kea DHCP HA was not configured — see step 4 for why.</div>`;
     } else {
       warnings += `<div class="callout ok">Kea HA ${s.keaHaMode === 'adopt' ? 'matched to the existing config' : 'built fresh'} on the dedicated SYNC link, role ${s.keaHaMode === 'adopt' ? `flipped from the primary's existing role` : 'primary/standby'}.</div>`;
+    }
+    if (s.keaHaMode === 'adopt' && analysis.existingKeaHa.remotename && analysis.existingKeaHa.remotename !== s.secHostname) {
+      warnings += `<div class="callout warn">Kea HA: the primary already names its peer <code>${escapeHtml(analysis.existingKeaHa.remotename)}</code>, so the secondary's Kea HA <code>localname</code> was set to that — not to the hostname <code>${escapeHtml(s.secHostname)}</code>. Kea requires both sides to agree on peer names; the hostname itself is unaffected.</div>`;
     }
   }
   const outOfScope = [];

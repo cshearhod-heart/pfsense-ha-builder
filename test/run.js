@@ -107,6 +107,16 @@ test('task5: unchecking a CARP card drops its DHCP failover instead of crashing'
   assert.equal(text(lan, 'failover_peerip') || '', '', 'no failover peer written for an interface without CARP');
 });
 
+test("task6: adopted Kea HA uses the primary's remotename for the secondary localname", async () => {
+  const r = await generate({ fixture: 'sample-config-kea-existing-ha.xml', name: 'task6', tweak: async page => {
+    await page.fill('#secHostname', 'totally-different-name');
+  }});
+  const ha = section(r.secondaryXml, '<ha>', '</ha>');
+  assert.equal(text(ha, 'localname'), 'fw-kea-ha-b');
+  assert.equal(text(section(r.secondaryXml, '<system>', '</system>'), 'hostname'), 'totally-different-name');
+  assert.match(r.warningsText, /already names its peer/);
+});
+
 (async () => {
   let failed = 0;
   for (const t of tests) {
