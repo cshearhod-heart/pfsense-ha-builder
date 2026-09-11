@@ -93,6 +93,45 @@ test('task3b: an explicit DHCP DNS list survives a reuse swap untouched', async 
   assert.match(r.warningsText, /already has its own DNS server list, which was left exactly as it is/);
 });
 
+// An adopted interface never gets the gateway/DNS override written for it, so if the original
+// HA build missed it the pair is quietly broken for DHCP clients. Report it, never rewrite it:
+// that's live primary config, and dhcpd is synced config anyway.
+test('adopted interface with no DHCP gateway/DNS is flagged, not modified', async () => {
+  const r = await generate({ fixture: 'sample-config-adopted-dhcp-gap.xml', name: 'dhcp-gap' });
+  assert.deepEqual(r.pageErrors, []);
+  assert.match(r.warningsText, /DHCP clients would be handed a non-floating address/);
+  assert.match(r.warningsText, /hand out 10\.10\.10\.2 as the default gateway and DNS server/);
+  assert.match(r.warningsText, /not the CARP VIP 10\.10\.10\.1/);
+  assert.match(r.warningsText, /original build missed this/);
+  // Adopt-as-is: neither file may gain the fields the warning is about.
+  for (const xml of [r.primaryXml, r.secondaryXml]) {
+    const lan = section(section(xml, '<dhcpd>', '</dhcpd>'), '<lan>', '</lan>');
+    assert.equal(text(lan, 'gateway'), null, 'must not write a gateway onto an adopted interface');
+    assert.deepEqual(texts(lan, 'dnsserver'), [], 'must not write DNS servers onto an adopted interface');
+  }
+});
+
+test('a correctly-built HA pair is not flagged', async () => {
+  for (const fixture of ['sample-config-existing-ha.xml', 'sample-config-kea-existing-ha.xml']) {
+    const r = await generate({ fixture });
+    assert.doesNotMatch(r.warningsText, /non-floating address/, `${fixture} already points dhcpd at the VIP`);
+  }
+  // Reuse mode writes both overrides itself, so it must never flag either.
+  const reuse = await generate({ fixture: 'sample-config.xml' });
+  assert.doesNotMatch(reuse.warningsText, /non-floating address/);
+});
+
+test("'new' VIP strategy flags the DHCP gateway it strands", async () => {
+  const r = await generate({ fixture: 'sample-config.xml', name: 'new-mode-dhcp', tweak: async page => {
+    await page.selectOption('#mode_lan', 'new');
+    await page.fill('#vip_lan', '10.10.10.9');
+  }});
+  assert.deepEqual(r.pageErrors, []);
+  assert.match(r.warningsText, /hand out 10\.10\.10\.1 as the default gateway and DNS server/);
+  assert.match(r.warningsText, /not the CARP VIP 10\.10\.10\.9/);
+  assert.doesNotMatch(r.warningsText, /original build missed this/, 'not an adopted interface');
+});
+
 test('task4: every CARP VIP on the secondary is bumped +100, none on the primary', async () => {
   const r = await generate({ fixture: 'sample-config-multi-vip.xml' });
   const carpSkews = xml => section(xml, '<virtualip>', '</virtualip>').split('<vip>')

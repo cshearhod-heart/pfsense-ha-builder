@@ -646,6 +646,8 @@ function analyzeConfig(doc) {
   const dhcpRanges = new Map(); // key -> {from, to} ints, so address suggestion can avoid the active pool
   const existingFailoverPeerIp = new Map(); // key -> ip already configured, revealing the secondary's expected address
   const dhcpDnsFallbackIfaces = new Set(); // keys with no explicit <dnsserver>, i.e. where services.inc would hand out $ifcfgip
+  const dhcpGatewayByIface = new Map(); // key -> configured <gateway>, '' meaning "fall back to $ifcfgip"
+  const dhcpDnsByIface = new Map();     // key -> explicit <dnsserver> values, [] meaning "fall back to $ifcfgip"
   if (dhcpdEl) {
     for (const node of dhcpdEl.childNodes) {
       if (node.nodeType !== 1) continue;
@@ -661,6 +663,8 @@ function analyzeConfig(doc) {
       // <dnsserver> repeats (services.inc joins the array), so "has explicit DNS" means any
       // sibling with a value — not just the first one.
       if (!findChildren(node, 'dnsserver').some(d => d.textContent.trim() !== '')) dhcpDnsFallbackIfaces.add(node.nodeName);
+      dhcpGatewayByIface.set(node.nodeName, childText(node, 'gateway') || '');
+      dhcpDnsByIface.set(node.nodeName, findChildren(node, 'dnsserver').map(d => d.textContent.trim()).filter(Boolean));
     }
   }
 
@@ -751,7 +755,7 @@ function analyzeConfig(doc) {
     hostname, domain, backend,
     configVersion: childText(root, 'version') || root.getAttribute('version') || 'unknown',
     interfaces, usedPhysIfs, physIfOwner, existingVips, existingVipByInterface, usedVhids,
-    dhcpEnabledIfaces, dhcpRanges, existingFailoverPeerIp, dhcpDnsFallbackIfaces, existingHasync, existingHasyncDetails, existingKeaHa,
+    dhcpEnabledIfaces, dhcpRanges, existingFailoverPeerIp, dhcpDnsFallbackIfaces, dhcpGatewayByIface, dhcpDnsByIface, existingHasync, existingHasyncDetails, existingKeaHa,
     reservedByIface, gatewayIfaces, localDnsEnabled, outboundNatMode, ifaceAddrRefs,
     ipsecTunnels, openvpnServers, openvpnClients, certCount,
   };
@@ -766,6 +770,27 @@ function analyzeConfig(doc) {
 // Deliberately shared between applyCommon and renderOutput rather than re-derived in each.
 function dhcpDnsOverrideApplies(ifaceKey) {
   return analysis.localDnsEnabled && analysis.dhcpDnsFallbackIfaces.has(ifaceKey);
+}
+
+// What pfSense would actually hand DHCP clients on an interface, and whether that address is
+// the node's own non-floating one. In 'reuse' mode the generator writes both explicitly, so
+// this only ever fires for adopted (existing-VIP) and 'new'-strategy rows — where the tool
+// deliberately doesn't touch the primary's live config and can only report.
+//
+// "Wrong" here is deliberately narrow: the handed-out address being the interface's own real
+// IP, which is unique to one node and cannot fail over. An admin pointing DHCP at some other
+// gateway or DNS server is making a choice, not a mistake, so that stays silent.
+function dhcpHandoutGaps(row) {
+  const key = row.iface.key;
+  const realIp = row.iface.ipaddr;           // the node's own address after any swap
+  const gaps = [];
+  if (!analysis.dhcpEnabledIfaces.includes(key)) return gaps;
+  const gw = analysis.dhcpGatewayByIface.get(key) || '';
+  if ((gw === '' || gw === realIp) && realIp !== row.vip) gaps.push('default gateway');
+  const dns = analysis.dhcpDnsByIface.get(key) || [];
+  const dnsEffective = dns.length ? dns : (analysis.localDnsEnabled ? [realIp] : []);
+  if (dnsEffective.includes(realIp) && realIp !== row.vip) gaps.push('DNS server');
+  return gaps;
 }
 
 function nextVhid(taken) {
@@ -1647,6 +1672,26 @@ function renderOutput(result) {
       instead of the floating one, quietly defeating HA for them.
       ${dnsOverrideRows.length ? `The same was done for <code>/dnsserver</code> on ${dnsOverrideRows.map(r => escapeHtml(r.iface.descr)).join(', ')}, ${dnsOverrideRows.length === 1 ? 'which had no DNS servers of its own' : 'which had no DNS servers of their own'} — pfSense would otherwise hand out that same non-floating IP as the DNS server.` : ''}
       ${dnsKeptRows.length ? `<strong>${dnsKeptRows.map(r => escapeHtml(r.iface.descr)).join(', ')}</strong> already ${dnsKeptRows.length === 1 ? 'has its own DNS server list, which was' : 'have their own DNS server lists, which were'} left exactly as ${dnsKeptRows.length === 1 ? 'it is' : 'they are'} — the fallback never fires there, so there is nothing to rewrite.` : ''}
+    </div>`;
+  }
+  // Adopted and 'new'-strategy rows don't get the gateway/DNS override written for them, so
+  // check what the uploaded config would actually hand out and say so. Never rewritten: for an
+  // adopted interface that's live primary config, and dhcpd is synced config anyway — fixing
+  // only the secondary would be undone by the primary's first push.
+  const strandedDhcpRows = s.perIface
+    .filter(r => r.mode !== 'reuse')
+    .map(r => ({ row: r, gaps: dhcpHandoutGaps(r) }))
+    .filter(x => x.gaps.length);
+  if (strandedDhcpRows.length) {
+    warnings += `<div class="callout danger">
+      <strong>DHCP clients would be handed a non-floating address.</strong>
+      ${strandedDhcpRows.map(x => `On <strong>${escapeHtml(x.row.iface.descr)}</strong>, pfSense would hand out
+        <code>${escapeHtml(x.row.iface.ipaddr)}</code> as the ${x.gaps.join(' and ')} — that's this node's own real IP, not the
+        CARP VIP <code>${escapeHtml(x.row.vip)}</code>${(analysis.dhcpGatewayByIface.get(x.row.iface.key) || '') === '' && x.gaps.includes('default gateway') ? ' (the field is empty, so <code>services.inc</code> falls back to the interface address)' : ''}`).join('; ')}.
+      That address only exists on one firewall, so every DHCP client on that segment loses it at failover.
+      ${strandedDhcpRows.some(x => x.row.existing) ? 'These interfaces already had HA configured, so this tool left their live config untouched — it looks like the original build missed this. ' : ''}Set
+      <em>DHCP Server &gt; [interface] &gt; Gateway</em>${strandedDhcpRows.some(x => x.gaps.includes('DNS server')) ? ' and <em>DNS servers</em>' : ''} to the VIP on the
+      <strong>primary</strong> after import and let config sync carry it across — not changed by this tool.
     </div>`;
   }
   const newModeRows = s.perIface.filter(r => r.mode === 'new');
