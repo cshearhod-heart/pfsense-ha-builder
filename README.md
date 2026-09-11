@@ -52,11 +52,11 @@ ISC DHCP failover has a deliberate fail-safe (confirmed against Netgate's own tr
 - **A dedicated SYNC interface** on both files (new `optN` entry), carrying pfsync and the XMLRPC config-sync channel.
 - **A pass rule on the SYNC interface** (`filter/rule`, source "SYNC net", destination any) in both files. A newly created interface has no rules at all, which means default deny. pfSense auto-passes `proto carp` and nothing else — `set skip on pfsync0` in `filter.inc` is the pfsync *pseudo*-interface, not the physical NIC — so without this rule the pair boots with CARP working and pfsync, config sync, and Kea HA all silently blocked. This matches Netgate's HA recipe, which calls an allow-all from the Sync network sufficient; tighten it to TCP 443 + pfsync + TCP 8765-8766 after import if your policy requires. Skipped entirely when the SYNC interface is already live on the primary — its existing rules are the customer's and are carried through untouched.
 - **`<hasync>`** (System > High Availability Sync): pfsync peer IP, config-sync target, and the section-level sync checkboxes (rules, NAT, aliases, virtual IPs, etc.) — configured one-directional (primary pushes to secondary; the secondary's "Synchronize Config to IP" is left blank), matching pfSense's own recommendation.
-- **DHCP failover** (`dhcpd/<iface>/failover_peerip`) for ISC-backend interfaces with DHCP enabled, per Heart's standard that DHCP stays on the firewall (see `~/second-brain/team/pfsense-configuration-standard.md`).
+- **DHCP failover** (`dhcpd/<iface>/failover_peerip`) for ISC-backend interfaces with DHCP enabled, per Heart's internal pfSense configuration standard, which keeps DHCP on the firewall.
 
 ## Why the secondary's CARP advskew is fixed at +100, not editable
 
-Verified against pfSense's own config-sync engine (`rc.filter_synchronize` in the pfSense source): when the primary pushes its config to the secondary via XMLRPC, it automatically adds 100 to every CARP VIP's `advskew` (capped at 254) in the copy it sends. Rather than generate a secondary file that's only correct *after* the first sync, this tool bakes in the post-sync value up front — set the primary's skew (default 0, advanced section), and the secondary is always skew+100. The same source confirms `failover_peerip` gets rewritten to the sender's own IP on each sync, which is why the DHCP failover fields this tool sets already match what pfSense would converge to on its own.
+Verified against pfSense's own config-sync engine (`rc.filter_synchronize` in the pfSense source): when the primary pushes its config to the secondary via XMLRPC, it automatically adds 100 to every CARP VIP's `advskew` (capped at 254) in the copy it sends. Rather than generate a secondary file that's only correct *after* the first sync, this tool bakes in the post-sync value up front. Neither side's skew is editable: a newly created VIP is 0 on the primary and 100 on the secondary, and an adopted VIP keeps whatever the primary already has with +100 on the secondary. The bump applies to *every* `mode=carp` VIP in the config, not just the ones whose interface you selected — an unbumped VIP would sit at equal skew on the same VHID as its partner, and that tie is broken by IP address, i.e. a coin flip over which node holds MASTER. The same source confirms `failover_peerip` gets rewritten to the sender's own IP on each sync, which is why the DHCP failover fields this tool sets already match what pfSense would converge to on its own.
 
 ## VLAN interfaces
 
@@ -72,7 +72,7 @@ The SYNC section offers two sources: **create a new dedicated interface** (the d
 
 ## Kea DHCP HA
 
-Kea's HA is a completely different mechanism from ISC's `failover_peerip` — a hot-standby control-plane relationship (`<kea><ha>`: `role` primary/standby, `localname`/`localip` vs `remotename`/`remoteip`, optional TLS), verified against pfSense's own Kea settings page and a real customer's working config. It rides the same dedicated SYNC link this tool already builds for pfsync, so no separate IP scheme is needed.
+Kea's HA is a completely different mechanism from ISC's `failover_peerip` — a hot-standby control-plane relationship (`<kea><ha>`: `role` primary/standby, `localname`/`localip` vs `remotename`/`remoteip`, optional TLS), verified against pfSense's own Kea settings page and a working production config. It rides the same dedicated SYNC link this tool already builds for pfsync, so no separate IP scheme is needed.
 
 - **Already configured** (existing `<kea><ha>` with no TLS): adopted as-is, exactly like existing CARP — the primary is never touched, and the secondary gets a matching block with `localip`/`remoteip` swapped and `role` flipped, mirroring pfSense's own config-sync transform (`rc.filter_synchronize`) precisely, including leaving `heartbeatdelay`/`maxresponsedelay`/`maxackdelay`/`maxunackedclients`/`maxrejectedleaseupdates` unchanged since pfSense's own sync engine doesn't touch those either.
 - **Not yet configured** (`dhcpbackend` is `kea`, no existing `<kea><ha>`): offered as an opt-in checkbox, building a fresh plaintext (no TLS) HA pair on the SYNC link.
@@ -85,7 +85,14 @@ Kea's HA is a completely different mechanism from ISC's `failover_peerip` — a 
 
 ## Test fixtures
 
-`test-fixtures/sample-config.xml` is synthetic (fake IPs, fake hostnames, no real credentials) — safe to commit and safe to open. Never replace it with a real backup; real config.xml files are gitignored by default (see `.gitignore`).
+All fixtures are synthetic (fake IPs, fake hostnames, no real credentials) — safe to commit and safe to open. Never replace one with a real backup; real config.xml files are gitignored by default (see `.gitignore`).
+
+| Fixture | Exercises |
+|---|---|
+| `sample-config.xml` | Fresh build, no HA anywhere: a `/29` WAN whose gateway sits in the suggestion path, an ISC DHCP scope on LAN, a local resolver (`unbound`), automatic outbound NAT, and a port forward using the "WAN address" macro. |
+| `sample-config-existing-ha.xml` | A primary already carrying a CARP VIP and a live `hasync`/pfsync interface — the adopt-as-is path, where nothing live may be touched. |
+| `sample-config-multi-vip.xml` | The same, plus a second CARP VIP on the same interface — the case where bumping one VIP per interface isn't enough. |
+| `sample-config-kea-existing-ha.xml` | CARP + `hasync` + Kea HA all present at once on the same SYNC link, with a `remotename` that differs from the generated secondary hostname. |
 
 ## Testing
 

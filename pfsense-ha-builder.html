@@ -3,6 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- Defense in depth for invariant #1 (nothing leaves the browser tab). The tool makes no
+     network calls by design; this makes a future stray one fail loudly instead of silently.
+     'unsafe-inline' covers this file's own inline <style> and <script> — it's a single
+     self-contained file, so there is nothing external to allow. connect-src 'none' is the
+     load-bearing part: no fetch, no XHR, no beacon, no WebSocket. Blob downloads are
+     unaffected (CSP does not govern <a download>), and the Netgate doc links still open. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
 <title>pfSense HA / CARP Builder</title>
 <style>
   :root {
@@ -165,6 +172,7 @@
 
     <h3>CARP: interfaces, virtual IPs, and real IPs</h3>
     <p class="hint">One entry per interface with a static IPv4 address. DHCP/PPPoE interfaces are listed but skipped — CARP needs a stable address on both boxes. Uncheck any interface that shouldn't get a CARP VIP.</p>
+    <p class="hint">VHIDs must be unique on the L2 segment, including any VRRP or CARP running on other devices — they share the <code>00:00:5e:00:01:xx</code> MAC space. Defaults start at 10 to stay clear of group 1, the likeliest collision with an upstream router.</p>
     <div id="ifaceCards"></div>
 
     <details>
@@ -183,7 +191,7 @@
         </div>
       </div>
       <p class="hint">Applies to all VIPs below. Pre-filled with a random value — replace it if you'd rather use your own.</p>
-      <p class="hint">Secondary's advertising skew is not editable — pfSense's own config-sync engine adds 100 to whatever skew you set on the primary (capped at 254) every time it pushes config to the secondary, so the generated files match that behavior from first boot rather than drifting once sync starts.</p>
+      <p class="hint">Advertising skew is not editable on either side: the primary's is always 0 and the secondary's always +100 (capped at 254). That's what pfSense's own config-sync engine does to every CARP VIP each time it pushes config to the secondary, so the generated files match it from first boot rather than drifting once sync starts.</p>
     </details>
 
     <h3>Dedicated SYNC interface (pfsync + config sync)</h3>
@@ -322,13 +330,6 @@ function setText(doc, parent, tag, value) {
   const el = getOrCreateChild(doc, parent, tag);
   el.textContent = value;
   return el;
-}
-function setPresenceFlag(doc, parent, tag, present) {
-  // pfSense convention: an empty self-closing tag means "true"; absence means "false"
-  const existing = findChild(parent, tag);
-  if (present && !existing) { doc.createElement(tag); parent.appendChild(doc.createElement(tag)); }
-  else if (present && existing) { existing.textContent = ''; }
-  else if (!present && existing) { parent.removeChild(existing); }
 }
 function removeChildTag(parent, tag) {
   const el = findChild(parent, tag);
@@ -538,7 +539,7 @@ function analyzeConfig(doc) {
   const backend = dhcpBackendTop || dhcpBackend || 'isc';
 
   // Kea's own HA mechanism (hot-standby control-plane peering) — verified against pfSense's
-  // Kea settings page (services_dhcp_settings.php) and a real customer's working config.
+  // Kea settings page (services_dhcp_settings.php) and a working production config.
   // Structurally unrelated to ISC's failover_peerip.
   const keaEl = findChild(root, 'kea');
   const keaHaEl = keaEl ? findChild(keaEl, 'ha') : null;
@@ -752,8 +753,10 @@ function analyzeConfig(doc) {
   };
 }
 
+// Starts at 10, not 1. VHIDs must be unique per L2 domain and share the 00:00:5e:00:01:xx
+// MAC space with VRRP, so group 1 is the likeliest collision with an upstream router.
 function nextVhid(taken) {
-  for (let v = 1; v <= 255; v++) if (!taken.has(v)) return v;
+  for (let v = 10; v <= 255; v++) if (!taken.has(v)) return v;
   return null;
 }
 
@@ -970,11 +973,8 @@ function renderForm(a) {
       `<option value="new">Create a new dedicated interface</option>`,
       ...spareIfaces.map(i => `<option value="${i.key}">Reuse existing: ${escapeHtml(i.descr)} (${i.key}, ${escapeHtml(i.physIf)}) — currently unused</option>`),
     ].join('');
-    syncSourceEl.addEventListener('change', () => applySyncSource(a));
     applySyncSource(a);
     recalcSyncIps();
-    document.getElementById('syncBase').addEventListener('input', recalcSyncIps);
-    maskSelect.addEventListener('change', recalcSyncIps);
   }
 
   // hasync checkbox grid
@@ -1148,6 +1148,10 @@ function renderDhcpSection(a) {
 
 /* ---------- Step 5: validation + generation ---------- */
 
+document.getElementById('syncSource').addEventListener('change', () => applySyncSource(analysis));
+document.getElementById('syncBase').addEventListener('input', recalcSyncIps);
+document.getElementById('syncMaskBits').addEventListener('change', recalcSyncIps);
+
 document.getElementById('generateBtn').addEventListener('click', () => {
   const errs = validateForm();
   const errEl = document.getElementById('validationErrors');
@@ -1242,6 +1246,7 @@ function validateForm() {
   const errs = [];
   if (!s.secHostname) errs.push('Secondary hostname is required.');
   if (s.secHostname === analysis.hostname) errs.push('Secondary hostname must differ from the primary.');
+  if (s.secHostname && !/^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(s.secHostname)) errs.push('Secondary hostname must be a valid hostname label (letters, digits, hyphens; no spaces or underscores).');
   if (!s.perIface.length) errs.push('At least one interface must be included for HA.');
   if (!s.carpPassword) errs.push('CARP group password is required.');
 
@@ -1280,7 +1285,7 @@ function validateForm() {
     const owner = analysis.physIfOwner.get(s.syncIfPrimary);
     const ownerDesc = owner ? `${owner.descr} (${owner.key})` : 'another interface';
     const suggestion = owner && owner.isSpare
-      ? ` That slot has no address configured, so pick "Reuse existing: ${escapeHtml(owner.descr)}" from the Source dropdown above instead of creating a new interface for the same port.`
+      ? ` That slot has no address configured, so pick "Reuse existing: ${owner.descr}" from the Source dropdown above instead of creating a new interface for the same port.`
       : ' Free it up first (e.g. move that interface onto a VLAN or a different port), or pick a different port.';
     errs.push(`SYNC interface: physical port ${s.syncIfPrimary} is already assigned to ${ownerDesc} at the pfSense interface-assignment level, even though it may be unconfigured.${suggestion}`);
   }
@@ -1319,7 +1324,7 @@ function generateConfigs() {
   // Detect when the primary ends up functionally identical to what was uploaded (a fully
   // adopt-everything scenario, like a config where every CARP-eligible interface, the SYNC
   // interface, and hasync all already existed) — the revision block always bumps regardless,
-  // so it's excluded from this comparison. Confirmed with a real customer config: this is a
+  // so it's excluded from this comparison. Confirmed against a real production config: this is a
   // real, common case, not a hypothetical, and it was confusing without being called out.
   // Re-parses the already-serialized primaryXml rather than doc.cloneNode(true) — cloning a
   // Document doesn't reliably preserve whatever internal state XMLSerializer uses to decide
@@ -1334,7 +1339,12 @@ function generateConfigs() {
   stripRevision(freshOriginal);
   const primaryForCompare = new DOMParser().parseFromString(primaryXml, 'application/xml');
   stripRevision(primaryForCompare);
-  const primaryUnchanged = serializer.serializeToString(freshOriginal) === serializer.serializeToString(primaryForCompare);
+  // One side here is a re-parsed document and the other isn't, and whether XMLSerializer emits
+  // the <?xml ...?> declaration for a given document is engine-specific (this already bit us
+  // once via cloneNode — see CLAUDE.md). Strip the declaration from both rather than depend on
+  // Chromium and Firefox/Safari agreeing about it.
+  const stripDecl = xml => xml.replace(/^<\?xml[^>]*\?>\s*/, '');
+  const primaryUnchanged = stripDecl(serializer.serializeToString(freshOriginal)) === stripDecl(serializer.serializeToString(primaryForCompare));
 
   return {
     primaryXml,

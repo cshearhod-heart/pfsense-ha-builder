@@ -124,6 +124,41 @@ test('task7: automatic outbound NAT and "WAN address" rules are flagged in reuse
   assert.ok(r.primaryXml.includes('<network>wanip</network>'), 'NAT rule carried through unmodified');
 });
 
+// The CSP is defense in depth for invariant #1, so it has to actually bite — and it must not
+// break the one thing the tool exists to do, which is hand you two files.
+test('task8: CSP blocks network calls but the blob download still works', async () => {
+  const { chromium } = require('playwright');
+  const path = require('path');
+  const browser = await chromium.launch();
+  const page = await browser.newPage({ acceptDownloads: true });
+  const repo = path.resolve(__dirname, '..');
+  await page.goto('file://' + path.join(repo, 'pfsense-ha-builder.html'));
+  await page.setInputFiles('#fileInput', path.join(repo, 'test-fixtures', 'sample-config.xml'));
+  await page.waitForSelector('#step-form:not([hidden])');
+  await page.evaluate(() => {
+    const set = (id, v) => { const el = document.getElementById(id); if (el && !el.disabled && !el.value) el.value = v; };
+    set('hasyncPass', 'TestSyncPassword1'); set('syncIfPrimary', 'igb9'); set('syncIfSecondary', 'igb9');
+  });
+  await page.click('#generateBtn');
+  await page.waitForSelector('#step-output:not([hidden])');
+
+  const blocked = await page.evaluate(async () => {
+    try { await fetch('https://example.com/'); return false; } catch { return true; }
+  });
+  assert.equal(blocked, true, 'connect-src none must block fetch');
+
+  const download = await Promise.all([
+    page.waitForEvent('download', { timeout: 10000 }),
+    page.click('#dlPrimary'),
+  ]).then(([d]) => d);
+  assert.equal(download.suggestedFilename(), 'primary-updated.xml');
+  const stream = await download.createReadStream();
+  const chunks = [];
+  for await (const c of stream) chunks.push(c);
+  assert.ok(Buffer.concat(chunks).toString().startsWith('<?xml'), 'downloaded file is the generated config');
+  await browser.close();
+});
+
 (async () => {
   let failed = 0;
   for (const t of tests) {
