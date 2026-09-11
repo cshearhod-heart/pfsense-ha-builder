@@ -968,6 +968,18 @@ function renderForm(a) {
   }
 
   renderDhcpSection(a);
+
+  // ISC failover is meaningless (and mis-roles both nodes) without a CARP VIP on the interface,
+  // so the failover checkbox follows the interface's CARP checkbox rather than sitting there
+  // enabled and inviting an invalid combination.
+  for (const iface of a.interfaces) {
+    const inc = document.getElementById('inc_' + iface.key);
+    const fo = document.getElementById('dhcpfo_' + iface.key);
+    if (!inc || !fo) continue;
+    const follow = () => { fo.disabled = !inc.checked; };
+    inc.addEventListener('change', follow);
+    follow();
+  }
 }
 
 function applyIfaceMode(iface) {
@@ -1117,7 +1129,16 @@ document.getElementById('generateBtn').addEventListener('click', () => {
     return;
   }
   errEl.innerHTML = '';
-  const result = generateConfigs();
+  // A throw in here used to surface as nothing at all: no output section, no message, just a
+  // dead button and an error only visible in the console.
+  let result;
+  try {
+    result = generateConfigs();
+  } catch (err) {
+    errEl.innerHTML = `<div class="callout danger"><strong>Generation failed:</strong> ${escapeHtml(err.message)}. Nothing was produced. This is a bug in the tool, not a problem with your config — please report it with the steps you took.</div>`;
+    console.error(err);
+    return;
+  }
   renderOutput(result);
   document.getElementById('step-output').hidden = false;
   document.getElementById('step-output').scrollIntoView({ behavior: 'smooth' });
@@ -1173,8 +1194,12 @@ function collectFormState() {
     hasyncPass: document.getElementById('hasyncPass').value,
     hasyncSections: Array.from(document.querySelectorAll('#syncSections input[data-hasync]'))
       .filter(cb => cb.checked).map(cb => cb.dataset.hasync),
+    // Tied to `included`, not to all static interfaces: ISC failover on an interface with no
+    // CARP VIP is invalid anyway (services.inc leaves $skew at 110, so *both* nodes come up as
+    // the "secondary" peer), and reaching past the CARP selection here meant applyCommon looked
+    // up a perIface row that didn't exist and threw on row.secIp.
     dhcpFailover: analysis.backend === 'isc'
-      ? analysis.interfaces.filter(i => analysis.dhcpEnabledIfaces.includes(i.key) && i.isStatic
+      ? included.filter(i => analysis.dhcpEnabledIfaces.includes(i.key)
           && document.getElementById('dhcpfo_' + i.key) && document.getElementById('dhcpfo_' + i.key).checked)
           .map(i => i.key)
       : [],
@@ -1326,18 +1351,26 @@ function applyCommon(doc, role, s, cidr, syncKey, existingSyncActive) {
   // only the secondary needs one, matching the existing password/advbase exactly (required
   // for CARP negotiation to work) with advskew computed from the *existing* skew, not 0.
   const vipEl = getOrCreateChild(doc, root, 'virtualip');
-  for (const row of s.perIface) {
-    if (row.existing) {
-      // Both docs were cloned from the same original, so the existing <vip> is already
-      // present in *both* — never append a second one. Primary needs no change at all;
-      // secondary just needs its advskew bumped in place, exactly like pfSense's own sync
-      // engine does it (uniqid and everything else stays identical between the two).
-      if (role === 'secondary') {
-        const existingVipEl = findChildren(vipEl, 'vip').find(v => childText(v, 'interface') === row.iface.key);
-        if (existingVipEl) setText(doc, existingVipEl, 'advskew', String(Math.min(254, row.existingVip.advskew + 100)));
-      }
-      continue;
+  if (role === 'secondary') {
+    // Every CARP VIP already in the source config gets advskew +100 (capped 254) — selected
+    // interface or not, one per interface or several. That's exactly what rc.filter_synchronize
+    // does on every push, and the alternatives are both broken: keying this off the selected
+    // rows missed an unchecked interface's VIP entirely, and matching one <vip> per interface
+    // missed the second and subsequent VIPs on an interface (a WAN with a public block is the
+    // everyday case). Equal advskew on the same VHID is a tie broken by IP address — i.e. a
+    // coin flip over which node is MASTER for that VIP.
+    //
+    // Both docs are clones of the same original, so these elements are already present in
+    // both; update in place, never append. uniqid therefore stays identical between the two
+    // files, which is correct — real pfSense sync never regenerates it either.
+    for (const vip of findChildren(vipEl, 'vip')) {
+      if (childText(vip, 'mode') !== 'carp') continue;
+      const skew = parseInt(childText(vip, 'advskew'), 10) || 0;
+      setText(doc, vip, 'advskew', String(Math.min(254, skew + 100)));
     }
+  }
+  for (const row of s.perIface) {
+    if (row.existing) continue; // handled above on the secondary; untouched on the primary
     const vip = doc.createElement('vip');
     setText(doc, vip, 'mode', 'carp');
     setText(doc, vip, 'interface', row.iface.key);
@@ -1348,7 +1381,7 @@ function applyCommon(doc, role, s, cidr, syncKey, existingSyncActive) {
     setText(doc, vip, 'password', s.carpPassword);
     setText(doc, vip, 'vhid', String(row.vhid));
     setText(doc, vip, 'advbase', String(s.advbase));
-    setText(doc, vip, 'advskew', String(role === 'primary' ? 0 : Math.min(254, 100)));
+    setText(doc, vip, 'advskew', String(role === 'primary' ? 0 : 100));
     setText(doc, vip, 'uniqid', cryptoRandomId());
     vipEl.appendChild(vip);
   }
@@ -1580,7 +1613,7 @@ function renderOutput(result) {
           <td>${escapeHtml(r.primaryIp)}</td>
           <td>${escapeHtml(r.secIp)}</td>
           <td>${escapeHtml(r.vip)}</td>
-          <td>${r.vhid} <span class="muted">(secondary advskew: 100)</span></td>
+          <td>${r.vhid} <span class="muted">(secondary advskew: ${r.existing ? Math.min(254, r.existingVip.advskew + 100) : 100})</span></td>
         </tr>`).join('')}
       <tr>
         <td>SYNC (${result.syncKey})</td>

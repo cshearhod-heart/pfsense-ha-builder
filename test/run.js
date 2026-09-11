@@ -79,6 +79,34 @@ test('task3: reuse mode sets dhcpd dnsserver to the VIP when a local resolver is
   }
 });
 
+test('task4: every CARP VIP on the secondary is bumped +100, none on the primary', async () => {
+  const r = await generate({ fixture: 'sample-config-multi-vip.xml' });
+  const carpSkews = xml => section(xml, '<virtualip>', '</virtualip>').split('<vip>')
+    .filter(v => v.includes('<mode>carp</mode>')).map(v => [text(v, 'vhid'), text(v, 'advskew')]);
+  const sec = carpSkews(r.secondaryXml);
+  assert.ok(sec.length >= 2, 'fixture has at least two CARP VIPs');
+  for (const [vhid, skew] of sec) assert.equal(skew, '100', `secondary VHID ${vhid} should be 100`);
+  const pri = carpSkews(r.primaryXml).filter(([vhid]) => vhid === '7' || vhid === '8');
+  for (const [vhid, skew] of pri) assert.equal(skew, '0', `primary VHID ${vhid} untouched`);
+
+  // Unchecking the LAN card must not leave its existing VIPs at skew 0 on the secondary.
+  const r2 = await generate({ fixture: 'sample-config-multi-vip.xml', name: 'task4-unchecked', tweak: async page => {
+    await page.uncheck('#inc_lan');
+  }});
+  for (const [vhid, skew] of carpSkews(r2.secondaryXml)) assert.equal(skew, '100', `secondary VHID ${vhid} bumped even when unchecked`);
+});
+
+test('task5: unchecking a CARP card drops its DHCP failover instead of crashing', async () => {
+  const r = await generate({ fixture: 'sample-config.xml', name: 'task5', tweak: async page => {
+    await page.uncheck('#inc_lan');
+    assert.equal(await page.isDisabled('#dhcpfo_lan'), true, 'failover box follows the CARP box');
+  }});
+  assert.deepEqual(r.pageErrors, []);
+  assert.ok(r.outputShown);
+  const lan = section(section(r.primaryXml, '<dhcpd>', '</dhcpd>'), '<lan>', '</lan>');
+  assert.equal(text(lan, 'failover_peerip') || '', '', 'no failover peer written for an interface without CARP');
+});
+
 (async () => {
   let failed = 0;
   for (const t of tests) {
