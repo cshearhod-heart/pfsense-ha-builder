@@ -52,6 +52,24 @@ test('task1: WAN suggestion skips the ISP gateway and validation rejects it', as
   assert.equal(r2.outputShown, false);
 });
 
+test('task2: both files get a pass rule on the SYNC interface; adopt path adds none', async () => {
+  const r = await generate({ fixture: 'sample-config.xml' });
+  for (const xml of [r.primaryXml, r.secondaryXml]) {
+    const rules = section(xml, '<filter>', '</filter>').split('<rule>').filter(x => x.includes('</rule>'));
+    const syncRules = rules.filter(x => text(x, 'interface') === r.syncKey);
+    assert.equal(syncRules.length, 1, 'exactly one generated rule on the SYNC interface');
+    assert.equal(text(syncRules[0], 'type'), 'pass');
+    assert.equal(text(section(syncRules[0], '<source>', '</source>'), 'network'), r.syncKey);
+    assert.ok(section(syncRules[0], '<destination>', '</destination>').includes('<any/>'), 'destination any');
+    assert.match(text(syncRules[0], 'tracker'), /^\d{10}$/);
+  }
+  assert.match(r.warningsText, /pass rule from SYNC net/);
+
+  const adopted = await generate({ fixture: 'sample-config-existing-ha.xml' });
+  assert.equal(adopted.primaryXml.includes('HA: pass from SYNC net'), false, 'live SYNC interface must not be touched');
+  assert.equal(adopted.secondaryXml.includes('HA: pass from SYNC net'), false);
+});
+
 (async () => {
   let failed = 0;
   for (const t of tests) {
